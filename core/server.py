@@ -815,6 +815,13 @@ class Socks5Server:
                                     data=sub,
                                     username=username,
                                 )
+                                if direction == "↑UP":
+                                    traffic_file_logger.log_complete_01_uplink_frame(
+                                        conn_id=conn_id,
+                                        client_ip=client_ip,
+                                        data=sub,
+                                        username=username,
+                                    )
                             except Exception:
                                 pass
                             

@@ -9,9 +9,11 @@
 #   33_downlink.log           — 33 下行帧：前64B密文（用于对照 tcp_raw.log）+ 明文可打印字符串
 #   3366_record_reason.log    — 33 未入池原因（Key未取、解密失败、明文无01切片等）
 #   3366_raw_high_entropy_drop.log — 3366 含 01_0A_00_09/23 的丢包记录
+#   01_uplink_frames_test.json — test 账号完整 01 上行帧，JSON 二维字节数组
 # ─────────────────────────────────────────
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -42,6 +44,7 @@ class TrafficSessionLog:
 
     _lock = threading.Lock()
     _dir: str | None = None
+    _json_array_files: set[str] = set()
 
     @classmethod
     def enabled(cls) -> bool:
@@ -68,6 +71,7 @@ class TrafficSessionLog:
         base = os.getcwd()
         with cls._lock:
             cls._dir = None
+            cls._json_array_files.clear()
             try:
                 for name in os.listdir(base):
                     if not _RUN_DIR_PATTERN.match(name):
@@ -89,6 +93,7 @@ class TrafficSessionLog:
         """仅清空当前进程内的详单目录句柄，不删磁盘目录（下次写入会新建 PyProxyTrafficLogs_*）。"""
         with cls._lock:
             cls._dir = None
+            cls._json_array_files.clear()
 
     @classmethod
     def ensure_log_dir_ready(cls) -> str | None:
@@ -125,6 +130,7 @@ class TrafficSessionLog:
                     "- 33_downlink.log                : 33 下行帧（前64B密文 + 明文可打印字符串，对照 tcp_raw.log）\n"
                     "- 3366_record_reason.log         : 33 未入池原因（Key未取、解密失败、明文无01切片等）\n"
                     "- 3366_raw_high_entropy_drop.log : 3366 含 01_0A_00_09/23 的丢包记录\n"
+                    "- 01_uplink_frames_test.json     : test 账号完整 01 上行帧；每帧为一个字节数组\n"
                 )
         except OSError:
             pass
@@ -142,6 +148,46 @@ class TrafficSessionLog:
             try:
                 with open(path, "a", encoding="utf-8") as f:
                     f.write(text)
+            except OSError:
+                pass
+
+    @classmethod
+    def _append_json_byte_array(cls, filename: str, data: bytes) -> None:
+        """向始终有效的 JSON 顶层数组追加一条完整帧字节数组。"""
+        if not cls.enabled() or not data:
+            return
+        encoded = json.dumps(list(data), separators=(",", ":")).encode("ascii")
+        with cls._lock:
+            d = cls._ensure_dir()
+            if not d:
+                return
+            path = os.path.join(d, filename)
+            try:
+                if path not in cls._json_array_files or not os.path.exists(path):
+                    with open(path, "wb") as f:
+                        f.write(b"[\n")
+                        f.write(encoded)
+                        f.write(b"\n]\n")
+                    cls._json_array_files.add(path)
+                    return
+
+                with open(path, "r+b") as f:
+                    f.seek(0, os.SEEK_END)
+                    pos = f.tell() - 1
+                    current = b""
+                    while pos >= 0:
+                        f.seek(pos)
+                        current = f.read(1)
+                        if current not in b" \t\r\n":
+                            break
+                        pos -= 1
+                    if pos < 0 or current != b"]":
+                        return
+                    f.seek(pos)
+                    f.write(b",\n")
+                    f.write(encoded)
+                    f.write(b"\n]\n")
+                    f.truncate()
             except OSError:
                 pass
 
@@ -257,6 +303,34 @@ class TrafficSessionLog:
         else:
             body = f"  {cls._wrap_hex(hx)}\n"
         cls._append("01_sliced.log", header + body + "\n")
+
+    @classmethod
+    def log_complete_01_uplink_frame(
+        cls,
+        *,
+        conn_id: str,
+        client_ip: str,
+        data: bytes,
+        username: str = "",
+    ) -> None:
+        """
+        记录指定测试账号的完整 01 上行物理帧。
+
+        调用点位于 TCP 分包组装完成之后，因此 JSON 中每个子数组都是一条完整
+        ``01 00`` 帧；文件整体格式为 ``[[byte, ...], [byte, ...]]``。
+        """
+        if not app_config.get("complete_01_uplink_capture_enabled", True):
+            return
+        target_user = str(
+            app_config.get("complete_01_uplink_capture_user", "test") or "test"
+        ).strip()
+        if not target_user or username != target_user or not data:
+            return
+        safe_user = re.sub(r"[^0-9A-Za-z_.-]+", "_", target_user) or "test"
+        cls._append_json_byte_array(
+            f"01_uplink_frames_{safe_user}.json",
+            bytes(data),
+        )
 
     @classmethod
     def log_01_replace(

@@ -59,6 +59,9 @@ class AppConfig:
         # 运行目录下 PyProxyTrafficLogs_* 详单（TCP≥阈值、3366、01 替换校验）
         "traffic_session_log_enabled": True,
         "traffic_log_min_len": 10,
+        # 测试账号完整 01 上行帧：TCP 分包组装完成后，以 JSON 二维字节数组写入单独文件
+        "complete_01_uplink_capture_enabled": True,
+        "complete_01_uplink_capture_user": "test",
         # 录制端口空闲超时（秒）：连接超过此时长没有任何数据则主动断开
         # 0 = 不超时（等连接自然断开）；推荐 120~300
         "record_idle_timeout": 180,

@@ -17,6 +17,9 @@ ACE `01` / `3366` 数据的录制、顺序重放和拦截管理。
 - 由内向外更新长度，对完整逻辑 payload 重算 CRC32，并按 4096 字节重新分片。
 - 连接状态明确分为 `录制`、`重放`、`实时重放`、`待匹配`。
 - 暗区专项拦截：01 大包、33 字符串、上行脏数据、上行截断与下行块填充。
+- `test` 账号在录制端口上线时，将 TCP 分包组装后的完整 01 上行帧保存为
+  `PyProxyTrafficLogs_*/01_uplink_frames_test.json`，格式为二维字节数组。
+- 用户管理支持复选框、全选、取消全选和批量删除。
 
 ## 目录
 
@@ -57,6 +60,8 @@ python main.py --headless
 | `record_idle_timeout` | 180 | 录制空闲断开秒数 |
 | `auto_disconnect_01_threshold` | 100 | 录制模板阈值 |
 | `replay_strict_match` | true | 账户无匹配池时严格处理 |
+| `complete_01_uplink_capture_enabled` | true | 保存测试账号完整 01 上行帧 |
+| `complete_01_uplink_capture_user` | test | 需要保存完整 01 上行帧的代理账号 |
 | `az_dl_intercept_enabled` | false | 暗区 33 下行字符串拦截 |
 | `dl_01_block_enabled` | false | 暗区 01 下行大包拦截 |
 | `ace_chunk_block_enabled` | false | 暗区下行块填充 |

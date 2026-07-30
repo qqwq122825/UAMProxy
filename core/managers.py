@@ -142,6 +142,25 @@ class UserManager:
         self._users = [u for u in self._users if u["username"] != username]
         self.save()
 
+    def remove_many(self, usernames) -> int:
+        """批量删除用户并只写盘一次，返回实际删除数量。"""
+        wanted = {
+            str(username).strip()
+            for username in usernames
+            if username is not None and str(username).strip()
+        }
+        if not wanted:
+            return 0
+        before = len(self._users)
+        self._users = [
+            user for user in self._users
+            if str(user.get("username") or "") not in wanted
+        ]
+        removed = before - len(self._users)
+        if removed:
+            self.save()
+        return removed
+
     def update_password(self, username: str, new_pass: str):
         for u in self._users:
             if u["username"] == username:

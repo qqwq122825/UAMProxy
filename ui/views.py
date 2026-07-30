@@ -645,9 +645,18 @@ class MainWindow(QMainWindow):
         bar = QHBoxLayout()
         self.btn_add_user    = QPushButton("➕  添加用户")
         self.btn_edit_passwd = QPushButton("🔑  修改密码")
-        self.btn_del_user    = QPushButton("🗑  删除选中")
+        self.btn_del_user    = QPushButton("🗑  批量删除")
+        self.btn_user_select_all = QPushButton("☑  全选")
+        self.btn_user_clear_checks = QPushButton("☐  取消全选")
         self.btn_reload_users = QPushButton("🔄  重载到代理")
-        for b in [self.btn_add_user, self.btn_edit_passwd, self.btn_del_user, self.btn_reload_users]:
+        for b in [
+            self.btn_add_user,
+            self.btn_edit_passwd,
+            self.btn_del_user,
+            self.btn_user_select_all,
+            self.btn_user_clear_checks,
+            self.btn_reload_users,
+        ]:
             b.setFixedHeight(30)
             bar.addWidget(b)
         bar.addStretch()
@@ -655,9 +664,14 @@ class MainWindow(QMainWindow):
         v.addLayout(bar)
 
         # 用户表格
-        self.user_table = QTableWidget(0, 7)
-        self.user_table.setHorizontalHeaderLabels(["用户名", "密码", "到期时间", "权限", "备注", "多开", "状态"])
-        self.user_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.user_table = QTableWidget(0, 8)
+        self.user_table.setHorizontalHeaderLabels(
+            ["选择", "用户名", "密码", "到期时间", "权限", "备注", "多开", "状态"]
+        )
+        user_header = self.user_table.horizontalHeader()
+        user_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        for column in range(1, 8):
+            user_header.setSectionResizeMode(column, QHeaderView.Stretch)
         self.user_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.user_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.user_table.verticalHeader().setVisible(False)
@@ -1797,6 +1811,12 @@ class MainWindow(QMainWindow):
         self.btn_add_user.clicked.connect(self._on_add_user)
         self.btn_edit_passwd.clicked.connect(self._on_edit_passwd)
         self.btn_del_user.clicked.connect(self._on_del_user)
+        self.btn_user_select_all.clicked.connect(
+            lambda: self._set_all_user_checks(Qt.Checked)
+        )
+        self.btn_user_clear_checks.clicked.connect(
+            lambda: self._set_all_user_checks(Qt.Unchecked)
+        )
         self.btn_reload_users.clicked.connect(self._on_reload_users)
         self.user_table.cellDoubleClicked.connect(self._on_user_table_double_click)
 
@@ -2071,7 +2091,7 @@ class MainWindow(QMainWindow):
         if row < 0:
             QMessageBox.warning(self, "提示", "请先选中要修改密码的用户")
             return
-        uname_item = self.user_table.item(row, 0)
+        uname_item = self.user_table.item(row, 1)
         if uname_item is None:
             return
         uname = uname_item.text()
@@ -2111,21 +2131,59 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "完成", f"用户 [{uname}] 密码已修改，请点击「重载到代理」使其生效。")
 
     def _on_del_user(self):
-        rows = self.user_table.selectedItems()
-        if not rows:
+        usernames = []
+        for row in range(self.user_table.rowCount()):
+            check_item = self.user_table.item(row, 0)
+            username_item = self.user_table.item(row, 1)
+            if (
+                check_item is not None
+                and username_item is not None
+                and check_item.checkState() == Qt.Checked
+            ):
+                usernames.append(username_item.text())
+
+        # 兼容原来的单行选择操作：未勾选时使用当前选中行。
+        if not usernames:
+            selected_rows = sorted({
+                item.row() for item in self.user_table.selectedItems()
+            })
+            usernames = [
+                self.user_table.item(row, 1).text()
+                for row in selected_rows
+                if self.user_table.item(row, 1) is not None
+            ]
+        if not usernames:
+            QMessageBox.information(self, "提示", "请先勾选需要删除的账号")
             return
-        row = self.user_table.currentRow()
-        uname = self.user_table.item(row, 0).text()
-        if QMessageBox.question(self, "确认", f"删除用户 [{uname}]？") == QMessageBox.Yes:
-            user_manager.remove(uname)
+
+        preview = "、".join(usernames[:8])
+        if len(usernames) > 8:
+            preview += f" 等 {len(usernames)} 个账号"
+        if QMessageBox.question(
+            self,
+            "确认批量删除",
+            f"确定删除：{preview}？",
+        ) == QMessageBox.Yes:
+            removed = user_manager.remove_many(usernames)
             self._refresh_user_table()
-            _event("INFO", "UserMgr", f"删除用户 [{uname}]")
+            _event(
+                "INFO",
+                "UserMgr",
+                f"批量删除 {removed} 个用户：{', '.join(usernames)}",
+            )
+
+    def _set_all_user_checks(self, state):
+        """全选或取消用户表的批量操作复选框。"""
+        for row in range(self.user_table.rowCount()):
+            item = self.user_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(state)
 
     def _on_user_table_double_click(self, row: int, col: int):
-        """双击"多开"列（col=5）快速切换该用户的多开权限"""
-        if col != 5:
+        """双击“多开”列（col=6）快速切换该用户的多开权限。"""
+        if col != 6:
             return
-        uname_item = self.user_table.item(row, 0)
+        uname_item = self.user_table.item(row, 1)
         if uname_item is None:
             return
         uname = uname_item.text()
@@ -2142,6 +2200,17 @@ class MainWindow(QMainWindow):
         engine.reload_users()
 
     def _refresh_user_table(self):
+        checked_usernames = set()
+        for row in range(self.user_table.rowCount()):
+            check_item = self.user_table.item(row, 0)
+            username_item = self.user_table.item(row, 1)
+            if (
+                check_item is not None
+                and username_item is not None
+                and check_item.checkState() == Qt.Checked
+            ):
+                checked_usernames.add(username_item.text())
+
         self.user_table.setRowCount(0)
         today = date.today().isoformat()
         for u in user_manager.all():
@@ -2154,13 +2223,20 @@ class MainWindow(QMainWindow):
             multi_text  = "✅ 允许" if allow_multi else "🔒 禁止"
             perm = (u.get("perm") or "both").lower()
             perm_text = "录制+重放" if perm == "both" else ("仅录制" if perm == "record" else "仅重放")
+            check_item = QTableWidgetItem()
+            check_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            check_item.setCheckState(
+                Qt.Checked if u["username"] in checked_usernames else Qt.Unchecked
+            )
+            check_item.setTextAlignment(Qt.AlignCenter)
+            self.user_table.setItem(row, 0, check_item)
             for col, text in enumerate([u["username"], u["password"], exp, perm_text,
-                                        u.get("note", ""), multi_text, status]):
+                                        u.get("note", ""), multi_text, status], start=1):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignCenter)
                 if expired:
                     item.setForeground(QColor("#888"))
-                elif col == 5 and allow_multi:
+                elif col == 6 and allow_multi:
                     item.setForeground(QColor("#4fc3f7"))  # 蓝色提示多开已开
                 self.user_table.setItem(row, col, item)
 

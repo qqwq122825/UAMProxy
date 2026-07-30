@@ -1,3 +1,6 @@
+import json
+import os
+import tempfile
 import unittest
 import zlib
 import sys
@@ -38,6 +41,9 @@ from core.crypto import (
 )
 from core.pool import RecordingPool
 from core.protocol_3366 import merge_3366_product_registry
+from core.config import app_config
+from core.managers import UserManager
+from core.traffic_session_log import TrafficSessionLog
 
 
 def make_record(selector: int, key_index: int, fill: int, size: int) -> bytes:
@@ -106,6 +112,69 @@ def split_frames(stream: bytes) -> list[bytes]:
 
 
 class ArenaReplayTests(unittest.TestCase):
+    def test_test_user_complete_uplink_frames_are_json_arrays(self):
+        old_dir = TrafficSessionLog._dir
+        old_json_files = TrafficSessionLog._json_array_files
+        old_enabled = app_config.get("complete_01_uplink_capture_enabled", True)
+        old_user = app_config.get("complete_01_uplink_capture_user", "test")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                TrafficSessionLog._dir = temp_dir
+                TrafficSessionLog._json_array_files = set()
+                app_config.set("complete_01_uplink_capture_enabled", True)
+                app_config.set("complete_01_uplink_capture_user", "test")
+                TrafficSessionLog.log_complete_01_uplink_frame(
+                    conn_id="conn-1",
+                    client_ip="127.0.0.1",
+                    data=b"\x01\x00\x00\x00\x05",
+                    username="test",
+                )
+                TrafficSessionLog.log_complete_01_uplink_frame(
+                    conn_id="conn-1",
+                    client_ip="127.0.0.1",
+                    data=b"\x01\x00\x00\x00\x06\xAA",
+                    username="test",
+                )
+                TrafficSessionLog.log_complete_01_uplink_frame(
+                    conn_id="conn-2",
+                    client_ip="127.0.0.2",
+                    data=b"\x01\x00\x00\x00\x05",
+                    username="other",
+                )
+                with open(
+                    os.path.join(temp_dir, "01_uplink_frames_test.json"),
+                    "r",
+                    encoding="utf-8",
+                ) as capture_file:
+                    saved = json.load(capture_file)
+                self.assertEqual(
+                    saved,
+                    [
+                        [1, 0, 0, 0, 5],
+                        [1, 0, 0, 0, 6, 170],
+                    ],
+                )
+        finally:
+            TrafficSessionLog._dir = old_dir
+            TrafficSessionLog._json_array_files = old_json_files
+            app_config.set("complete_01_uplink_capture_enabled", old_enabled)
+            app_config.set("complete_01_uplink_capture_user", old_user)
+
+    def test_user_manager_batch_delete(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = UserManager(os.path.join(temp_dir, "users.json"))
+            manager._users = [
+                {"username": "a", "password": "1"},
+                {"username": "b", "password": "2"},
+                {"username": "c", "password": "3"},
+            ]
+            manager.save()
+            self.assertEqual(manager.remove_many(["a", "c", "missing"]), 2)
+            self.assertEqual(
+                [user["username"] for user in manager.all()],
+                ["b"],
+            )
+
     def test_product_registry_is_arena_only(self):
         registry = merge_3366_product_registry({
             "0000094E": {"name": "暗区专项"},
