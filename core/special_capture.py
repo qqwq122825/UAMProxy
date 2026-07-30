@@ -97,6 +97,7 @@ class _Connection:
     key: bytes | None = None
     iv: bytes | None = None
     key_source: dict | None = None
+    seen_complete_downlink_1002: bool = False
     closed: bool = False
 
 
@@ -119,6 +120,8 @@ class SpecialCaptureManager:
             "frames3366": 0,
             "logicalMessages": 0,
             "rawBytes": 0,
+            "c2sBytes": 0,
+            "s2cBytes": 0,
         }
 
     @property
@@ -161,16 +164,22 @@ class SpecialCaptureManager:
                     "timezone": "Asia/Shanghai",
                     "deviceAlias": "DEVICE_A",
                     "accountAlias": "ACCOUNT_A",
-                    "accountStateBefore": "unknown",
+                    "accountStateBefore": "normal",
                     "gameVersion": "GAME_VERSION",
                     "bundleId": "BUNDLE_ID",
                     "networkMode": "socks5-proxy",
+                    "captureDirections": ["c2s", "s2c"],
                     "proxyVersion": "UAMProxy",
                     "trafficModified": False,
                     "replacementEnabled": False,
                     "lldbAttached": False,
                     "rawTap": "before_parse_and_forward",
                     "captureProtocols": ["01", "3366"],
+                    "samples": {
+                        "tersafeUUID": "F3C6779D-9098-3F23-ABB7-CF16682B7793",
+                        "UAGameUUID": "A7BACCFE-E360-3859-BCAA-CB7C500B5D6A",
+                        "GCloudUUID": "CBEE50AB-686C-380B-B764-16FCD7DBEE2F",
+                    },
                     "pcapngAvailable": False,
                     "pcapngNote": "SOCKS5 application proxy has no TCP sequence/UDP packet tap",
                     "scenario": [
@@ -188,6 +197,7 @@ class SpecialCaptureManager:
             )
             self._append_timeline_locked("phase", "capture_start", "专项采集启动")
             (self._root / "dns.jsonl").touch()
+            (self._root / "anomalies.jsonl").touch()
             (self._root / "capture.log").write_text(
                 f"{datetime.now().isoformat()} capture started accountAlias=ACCOUNT_A\n",
                 encoding="utf-8",
@@ -236,6 +246,13 @@ class SpecialCaptureManager:
             base = self._root / "flows" / "pending" / connection_id
             for name in ("chunks", "frames", "logical-messages"):
                 (base / name).mkdir(parents=True, exist_ok=True)
+            for name in (
+                "chunks.jsonl",
+                "frames.jsonl",
+                "c2s.raw.bin",
+                "s2c.raw.bin",
+            ):
+                (base / name).touch()
             unix_ns, mono_ns = _now_pair()
             state = _Connection(
                 proxy_id=proxy_conn_id,
@@ -316,6 +333,7 @@ class SpecialCaptureManager:
             state.parse_buf[canonical_dir].extend(payload)
             self._totals["chunks"] += 1
             self._totals["rawBytes"] += len(payload)
+            self._totals[f"{canonical_dir}Bytes"] += len(payload)
 
             if state.classification == "unknown":
                 self._try_classify_locked(state)
@@ -589,6 +607,12 @@ class SpecialCaptureManager:
     ) -> None:
         info = parse_3366_header(frame)
         msg = info["msg"] if info else b""
+        if (
+            direction == "s2c"
+            and msg == MSG_SERVER_KEY
+            and row["parseStatus"] == "complete"
+        ):
+            state.seen_complete_downlink_1002 = True
         product = find_embedded_product_id(frame)
         row.update(
             {
@@ -727,6 +751,7 @@ class SpecialCaptureManager:
             for direction in ("c2s", "s2c"):
                 self._finalize_partial_locked(state, direction)
             self._finalize_logical_groups_locked(state)
+            self._write_connection_anomalies_locked(state)
             unix_ns, mono_ns = _now_pair()
             state.closed = True
             if state.classification == "unknown" and self._root:
@@ -753,6 +778,44 @@ class SpecialCaptureManager:
                 close_mono_ns=mono_ns,
             )
             self._log_locked(f"close {state.connection_id} reason={reason}")
+
+    def _write_connection_anomalies_locked(self, state: _Connection) -> None:
+        if not self._root:
+            return
+        missing_dirs = [
+            direction for direction in ("c2s", "s2c")
+            if state.bytes_by_dir[direction] == 0
+        ]
+        if missing_dirs:
+            _append_jsonl(
+                self._root / "anomalies.jsonl",
+                {
+                    "schemaVersion": 1,
+                    "type": "ONE_DIRECTION_MISSING",
+                    "connectionId": state.connection_id,
+                    "classification": state.classification,
+                    "missingDirections": missing_dirs,
+                    "c2sBytes": state.bytes_by_dir["c2s"],
+                    "s2cBytes": state.bytes_by_dir["s2c"],
+                    "timestampUnixNs": time.time_ns(),
+                    "timestampMonotonicNs": time.monotonic_ns(),
+                },
+            )
+        if (
+            state.classification == "protocol-3366"
+            and not state.seen_complete_downlink_1002
+        ):
+            _append_jsonl(
+                self._root / "anomalies.jsonl",
+                {
+                    "schemaVersion": 1,
+                    "type": "MISSING_COMPLETE_DOWNLINK_1002",
+                    "connectionId": state.connection_id,
+                    "classification": state.classification,
+                    "timestampUnixNs": time.time_ns(),
+                    "timestampMonotonicNs": time.monotonic_ns(),
+                },
+            )
 
     def _finalize_logical_groups_locked(self, state: _Connection) -> None:
         for key, group in list(state.logical_groups.items()):
@@ -843,6 +906,9 @@ class SpecialCaptureManager:
         assert self._root is not None
         missing: list[str] = []
         invalid_jsonl: list[str] = []
+        stream_range_errors: list[str] = []
+        chunk_hash_errors: list[str] = []
+        forward_hash_mismatches: list[str] = []
         for path in self._root.rglob("*.jsonl"):
             line_no = 0
             try:
@@ -864,18 +930,84 @@ class SpecialCaptureManager:
                         missing.append(
                             f"{path.parent.relative_to(self._root)}/{rel}"
                         )
+        for path in self._root.rglob("chunks.jsonl"):
+            conn_dir = path.parent
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                direction = row.get("direction")
+                raw_stream = conn_dir / f"{direction}.raw.bin"
+                end = int(row.get("streamOffset", 0)) + int(
+                    row.get("payloadLength", 0)
+                )
+                if not raw_stream.is_file() or end > raw_stream.stat().st_size:
+                    stream_range_errors.append(
+                        f"{conn_dir.relative_to(self._root)}:"
+                        f"chunk={row.get('chunkId')} end={end}"
+                    )
+                raw_file = conn_dir / str(row.get("rawFile", ""))
+                if not raw_file.is_file():
+                    missing.append(str(raw_file.relative_to(self._root)))
+                elif _sha256(raw_file.read_bytes()) != row.get("payloadSha256"):
+                    chunk_hash_errors.append(str(raw_file.relative_to(self._root)))
+                if (
+                    row.get("modified") is not False
+                    or row.get("payloadLength") != row.get("forwardedLength")
+                    or row.get("payloadSha256") != row.get("forwardedSha256")
+                ):
+                    forward_hash_mismatches.append(
+                        f"{conn_dir.relative_to(self._root)}:"
+                        f"chunk={row.get('chunkId')}"
+                    )
+        session = json.loads((self._root / "session.json").read_text(encoding="utf-8"))
+        capture_directions_valid = session.get("captureDirections") == ["c2s", "s2c"]
+        connection_rows = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in self._root.rglob("connection.json")
+        ]
+        both_direction_count = sum(
+            1 for row in connection_rows
+            if row.get("c2sBytes", 0) > 0 and row.get("s2cBytes", 0) > 0
+        )
+        anomalies = [
+            json.loads(line)
+            for line in (self._root / "anomalies.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        ]
+        hard_failures = (
+            invalid_jsonl
+            or missing
+            or stream_range_errors
+            or chunk_hash_errors
+            or forward_hash_mismatches
+            or not capture_directions_valid
+        )
         return {
             "schemaVersion": 1,
             "generatedUnixNs": time.time_ns(),
             "trafficModified": False,
             "replacementEnabled": False,
-            "rawForwardHashesMatch": True,
+            "captureDirections": session.get("captureDirections"),
+            "captureDirectionsValid": capture_directions_valid,
+            "rawForwardHashesMatch": not forward_hash_mismatches,
             "totals": dict(self._totals),
+            "connectionsWithBothDirections": both_direction_count,
+            "connectionCount": len(connection_rows),
+            "anomalyCount": len(anomalies),
+            "anomalyTypes": sorted({row.get("type") for row in anomalies}),
             "invalidJsonl": invalid_jsonl,
             "missingReferencedFiles": missing,
+            "streamRangeErrors": stream_range_errors,
+            "chunkHashErrors": chunk_hash_errors,
+            "forwardHashMismatches": forward_hash_mismatches,
             "pcapngAvailable": False,
             "dnsCaptured": False,
-            "status": "pass" if not invalid_jsonl and not missing else "failed",
+            "status": "failed" if hard_failures else (
+                "pass_with_anomalies" if anomalies else "pass"
+            ),
         }
 
     def _write_checksums_locked(self) -> None:

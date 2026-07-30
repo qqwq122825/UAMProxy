@@ -141,6 +141,8 @@ class ArenaReplayTests(unittest.TestCase):
             frame01 = b"\x01\x00\x00\x00\x0BABCDEF"
             capture.record_chunk("proxy-01", "↑UP", frame01[:4])
             capture.record_chunk("proxy-01", "↑UP", frame01[4:])
+            down01 = b"\x01\x00\x00\x00\x0CTASKCFG"
+            capture.record_chunk("proxy-01", "↓DOWN", down01)
             capture.close_connection("proxy-01")
 
             self.assertTrue(
@@ -156,6 +158,13 @@ class ArenaReplayTests(unittest.TestCase):
             second3366 = frame_3366(b"\x20\x01", b"WORLD")
             capture.record_chunk(
                 "proxy-3366", "↑UP", first3366 + second3366
+            )
+            key = bytes(range(16))
+            key_payload = b"\x00" * 4 + b"\x10\x02\x10" + key
+            down1002 = frame_3366(b"\x10\x02", key_payload)
+            down_next = frame_3366(b"\x30\x02", b"ACK")
+            capture.record_chunk(
+                "proxy-3366", "↓DOWN", down1002 + down_next
             )
             capture.close_connection("proxy-3366")
             self.assertEqual(capture.stop(), root)
@@ -173,7 +182,13 @@ class ArenaReplayTests(unittest.TestCase):
                 os.path.join(conn01, "chunks.jsonl"), encoding="utf-8"
             ) as f:
                 chunks = [json.loads(line) for line in f if line.strip()]
-            self.assertEqual([row["streamOffset"] for row in chunks], [0, 4])
+            self.assertEqual(
+                [
+                    row["streamOffset"] for row in chunks
+                    if row["direction"] == "c2s"
+                ],
+                [0, 4],
+            )
             self.assertTrue(all(row["modified"] is False for row in chunks))
             with open(os.path.join(conn01, "c2s.raw.bin"), "rb") as f:
                 self.assertEqual(f.read(), frame01)
@@ -181,10 +196,13 @@ class ArenaReplayTests(unittest.TestCase):
                 os.path.join(conn01, "frames.jsonl"), encoding="utf-8"
             ) as f:
                 frames01 = [json.loads(line) for line in f if line.strip()]
-            self.assertEqual(len(frames01), 1)
-            self.assertEqual(frames01[0]["sourceChunkIds"], [1, 2])
+            self.assertEqual(len(frames01), 2)
+            uplink_frame = next(
+                row for row in frames01 if row["direction"] == "c2s"
+            )
+            self.assertEqual(uplink_frame["sourceChunkIds"], [1, 2])
             with open(
-                os.path.join(conn01, frames01[0]["rawFile"]), "rb"
+                os.path.join(conn01, uplink_frame["rawFile"]), "rb"
             ) as f:
                 self.assertEqual(f.read(), frame01)
             with open(
@@ -193,6 +211,18 @@ class ArenaReplayTests(unittest.TestCase):
                 frames3366 = [json.loads(line) for line in f if line.strip()]
             self.assertEqual(frames3366[0]["messageTypeHex"], "1001")
             self.assertEqual(frames3366[0]["parseStatus"], "complete")
+            self.assertTrue(
+                any(
+                    row["direction"] == "s2c"
+                    and row["messageTypeHex"] == "1002"
+                    and row["parseStatus"] == "complete"
+                    for row in frames3366
+                )
+            )
+            self.assertTrue(os.path.isfile(os.path.join(conn3366, "s2c.raw.bin")))
+            with open(os.path.join(root_path, "session.json"), encoding="utf-8") as f:
+                session = json.load(f)
+            self.assertEqual(session["captureDirections"], ["c2s", "s2c"])
             self.assertTrue(os.path.isfile(os.path.join(root_path, "checksums.sha256")))
             with open(
                 os.path.join(root_path, "integrity-report.json"), encoding="utf-8"
@@ -200,6 +230,8 @@ class ArenaReplayTests(unittest.TestCase):
                 report = json.load(f)
             self.assertEqual(report["status"], "pass")
             self.assertTrue(report["rawForwardHashesMatch"])
+            self.assertEqual(report["connectionsWithBothDirections"], 2)
+            self.assertEqual(report["anomalyCount"], 0)
             self.assertFalse(
                 any(name.startswith("PyProxyTrafficLogs_") for name in os.listdir(temp_dir))
             )
@@ -218,6 +250,29 @@ class ArenaReplayTests(unittest.TestCase):
                 [user["username"] for user in manager.all()],
                 ["b"],
             )
+
+    def test_capture_marks_missing_downlink_without_dropping_uplink(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            capture = SpecialCaptureManager()
+            root = capture.start("test", temp_dir)
+            capture.open_connection(
+                "one-way",
+                username="test",
+                client_endpoint="127.0.0.1:1003",
+                remote_endpoint="TARGET:10001",
+            )
+            frame = b"\x01\x00\x00\x00\x05"
+            capture.record_chunk("one-way", "c2s", frame)
+            capture.stop()
+            with open(os.path.join(root, "anomalies.jsonl"), encoding="utf-8") as f:
+                anomalies = [json.loads(line) for line in f if line.strip()]
+            self.assertEqual(anomalies[0]["type"], "ONE_DIRECTION_MISSING")
+            self.assertEqual(anomalies[0]["missingDirections"], ["s2c"])
+            raw_path = os.path.join(
+                root, "flows", "protocol-01", "conn-0001", "c2s.raw.bin"
+            )
+            with open(raw_path, "rb") as f:
+                self.assertEqual(f.read(), frame)
 
     def test_product_registry_is_arena_only(self):
         registry = merge_3366_product_registry({

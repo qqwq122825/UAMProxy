@@ -72,10 +72,15 @@ python main.py --headless
 
 - 每次代理读取的双向原始 TCP chunk、SHA256 与真实交错顺序；
 - 每条连接的 `c2s.raw.bin`、`s2c.raw.bin` 连续字节流；
-- TCP 拼接后切出的完整 01、3366 帧；
+- TCP 拼接后切出的完整 01、3366 上行与下行帧；
+- 3366 首条完整下行 `1002`（供同连接后续 `4013` 解密）；
 - 01 应用层分片重组后的逻辑消息；
 - 3366 的会话密钥上下文、4013 密文及成功解密的明文；
 - `session.json`、`timeline.jsonl`、完整性报告及 `checksums.sha256`。
+
+`session.json.captureDirections` 固定为 `["c2s","s2c"]`。个别连接只有单向
+数据时，已有字节仍会保留，并在 `anomalies.jsonl` 写入
+`ONE_DIRECTION_MISSING`。
 
 采集链路保持原样转发，常规流量详单、录制池数据和网络流监控数据均不生成。
 SOCKS5 应用层代理不具备 TCP 序号、UDP 和设备全量包视角，因此会在
