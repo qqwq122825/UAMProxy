@@ -778,7 +778,7 @@ class MainWindow(QMainWindow):
             self.rec_summary_labels[key] = label
         top_v.addLayout(rec_summary)
         _rec_hint = QLabel(
-            "新录制上线会先清空上一轮模板；重放按顺序取池，耗尽后等待追加，不回绕旧样本。"
+            "新录制上线会先清空上一轮模板；重放按录制顺序循环取池，末尾后回到第一条。"
         )
         _rec_hint.setWordWrap(True)
         _rec_hint.setStyleSheet("color:#8b949e;font-size:11px;padding:4px 0;")
@@ -2908,23 +2908,31 @@ class MainWindow(QMainWindow):
         total21: int = 0,
         cur01_fb: int = 0,
     ) -> str:
-        """格式化绝对重放进度；样本池耗尽后不回绕。"""
+        """格式化循环重放进度，并显示当前轮次。"""
         if total01 <= 0 and total33 <= 0:
             return "—"
+
+        def _cycle_progress(current: int, total: int) -> str:
+            if total <= 0:
+                return "—"
+            if current <= 0:
+                return f"0/{total}"
+            position = (current - 1) % total + 1
+            round_number = (current - 1) // total + 1
+            result = f"{position}/{total}"
+            if round_number > 1:
+                result += f" 第{round_number}轮"
+            return result
+
         parts = []
         if total01 > 0:
-            s1 = f"{min(cur01, total01)}/{total01}"
-            if cur01 >= total01:
-                s1 += " 已用完"
-            parts.append(f"01:{s1}")
+            parts.append(f"01:{_cycle_progress(cur01, total01)}")
         if total33 > 0 or cur01_fb > 0:
             p33 = []
             if total09 > 0:
-                s09 = f"{min(cur09, total09)}/{total09}"
-                p33.append(f"09 {s09}")
+                p33.append(f"09 {_cycle_progress(cur09, total09)}")
             if total21 > 0:
-                s21 = f"{min(cur21, total21)}/{total21}"
-                p33.append(f"21 {s21}")
+                p33.append(f"21 {_cycle_progress(cur21, total21)}")
             if cur01_fb > 0:
                 p33.append(f"回退{cur01_fb}")
             if p33:

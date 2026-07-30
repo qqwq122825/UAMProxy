@@ -369,20 +369,16 @@ def _ace_try_replace_length_fallback(
     if not pool or len(packet) <= header_skip:
         return packet, False
     tail_len = len(packet) - header_skip
-    best = None
-    best_i = -1
-    best_d = tol + 1
+    candidates = []
     for i, it in enumerate(pool):
         pl = it.get("payload") or b""
         d = abs(len(pl) - tail_len)
-        if d <= tol and d < best_d:
-            best_d = d
-            best = it
-            best_i = i
-    if best is None or best_i < 0:
+        if d <= tol:
+            candidates.append((d, i, it))
+    if not candidates:
         return packet, False
-    item = best
-    idx = best_i
+    candidates.sort(key=lambda row: (row[0], row[1]))
+    _delta, idx, item = candidates[int(pool_index[0]) % len(candidates)]
     pool_index[0] += 1
     new_pl = item.get("payload") or b""
     if not new_pl and tail_len > 0:
@@ -452,7 +448,7 @@ def replace_ace_fragment_group(
     """
     重组完整逻辑 payload，替换 type-9 加密记录，再重算 CRC32 并重新分片。
 
-    样本池使用绝对顺序游标；耗尽后保持原包并等待新录制追加，不回绕旧样本。
+    样本池按录制顺序循环使用；到达末尾后从第一条模板继续。
     """
     infos = [parse_ace_fragment(frame) for frame in frames]
     if not infos or any(info is None for info in infos):
@@ -463,9 +459,7 @@ def replace_ace_fragment_group(
         return b"".join(frames), False
     logical_payload = b"".join(info["data"] for info in infos)
 
-    idx = int(pool_index[0])
-    if idx >= len(pool):
-        return b"".join(info["frame"] for info in infos), False
+    idx = int(pool_index[0]) % len(pool)
     item = pool[idx]
     clean_record = item.get("payload") or b""
     if item.get("schema") != "tersafe-type9-clean-record-v2":
@@ -611,8 +605,9 @@ def _ace_try_replace(packet: bytes, pool: list[dict], pool_index: list,
                 candidates.append((d, i))
         if candidates:
             candidates.sort(key=lambda x: (x[0], x[1]))
-            best_d, idx = candidates[0]
+            best_d, idx = candidates[int(pool_index[0]) % len(candidates)]
             item = pool[idx]
+            pool_index[0] += 1
             pick_mode = "anchor_length"
         else:
             idx = pool_index[0] % len(pool)
@@ -620,9 +615,7 @@ def _ace_try_replace(packet: bytes, pool: list[dict], pool_index: list,
             pool_index[0] += 1
             pick_mode = "anchor_fallback_rr"
     else:
-        idx = pool_index[0]
-        if idx >= len(pool):
-            return packet, False
+        idx = pool_index[0] % len(pool)
         item = pool[idx]
         pool_index[0] += 1
     new_payload = item.get("payload") or b""
@@ -771,8 +764,8 @@ def try_replace_3366_4013_plain(
             if is_09:
                 # 09：33 池优先；若 33 池当前项与原始高熵长度差距过大（>len_tol），则从 01 池取更匹配的
                 use_01 = False
-                if pool_33_09 and index_33_09[0] < len(pool_33_09):
-                    idx = index_33_09[0]
+                if pool_33_09:
+                    idx = index_33_09[0] % len(pool_33_09)
                     item_33 = pool_33_09[idx]
                     gap_33 = abs(len(item_33.get("payload") or b"") - orig_len)
                     matches_01 = [
@@ -786,18 +779,17 @@ def try_replace_3366_4013_plain(
                 if use_01:
                     used_src = "01池回退"
                     idx_ref = index_01_fallback
-                    idx = idx_ref[0]
-                    if idx < len(matches_01):
-                        used_idx = idx
-                        item = matches_01[idx][0]
-                        idx_ref[0] = idx + 1
-                elif pool_33_09 and index_33_09[0] < len(pool_33_09):
+                    idx = idx_ref[0] % len(matches_01)
+                    used_idx = idx
+                    item = matches_01[idx][0]
+                    idx_ref[0] += 1
+                elif pool_33_09:
                     used_src = "33池"
                     idx_ref = index_33_09
-                    idx = idx_ref[0]
+                    idx = idx_ref[0] % len(pool_33_09)
                     used_idx = idx
                     item = pool_33_09[idx]
-                    idx_ref[0] = idx + 1
+                    idx_ref[0] += 1
                 else:
                     matches_01 = [
                         (it, abs(len(it.get("payload") or b"") - orig_len))
@@ -808,18 +800,17 @@ def try_replace_3366_4013_plain(
                         used_src = "01池回退"
                         matches_01.sort(key=lambda x: x[1])
                         idx_ref = index_01_fallback
-                        idx = idx_ref[0]
-                        if idx < len(matches_01):
-                            used_idx = idx
-                            item = matches_01[idx][0]
-                            idx_ref[0] = idx + 1
+                        idx = idx_ref[0] % len(matches_01)
+                        used_idx = idx
+                        item = matches_01[idx][0]
+                        idx_ref[0] += 1
             else:
-                if pool_33_21 and index_33_21[0] < len(pool_33_21):
+                if pool_33_21:
                     idx_ref = index_33_21
-                    idx = idx_ref[0]
+                    idx = idx_ref[0] % len(pool_33_21)
                     used_idx = idx
                     item = pool_33_21[idx]
-                    idx_ref[0] = idx + 1
+                    idx_ref[0] += 1
 
             if item is not None and idx_ref is not None:
                 new_payload = item.get("payload") or b""

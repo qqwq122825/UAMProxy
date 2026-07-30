@@ -30,9 +30,11 @@ except ModuleNotFoundError:
 from core.crypto import (
     ACE_FIRST_HEADER_LEN,
     ACE_NEXT_HEADER_LEN,
+    MARKER_01_0A_00_09,
     AceReplayAssembler,
     _ace_try_extract,
     parse_ace_fragment,
+    try_replace_3366_4013_plain,
 )
 from core.pool import RecordingPool
 from core.protocol_3366 import merge_3366_product_registry
@@ -173,18 +175,56 @@ class ArenaReplayTests(unittest.TestCase):
         self.assertEqual(items[0]["payload"], record)
         self.assertEqual(items[0]["fragment_count"], 2)
 
-    def test_pool_does_not_wrap(self):
+    def test_pool_cycles_in_recorded_order(self):
         live = make_frames(make_payload(make_record(0, 1, 0x66, 16)))[0]
-        clean = make_record(0, 2, 0x77, 16)
-        pool = [{"payload": clean, "schema": "tersafe-type9-clean-record-v2"}]
+        clean_first = make_record(0, 2, 0x77, 16)
+        clean_second = make_record(1, 3, 0x88, 16)
+        pool = [
+            {"payload": clean_first, "schema": "tersafe-type9-clean-record-v2"},
+            {"payload": clean_second, "schema": "tersafe-type9-clean-record-v2"},
+        ]
         index = [0, 0]
         assembler = AceReplayAssembler()
-        _, replaced_first = assembler.feed(live, pool, index)
-        second, replaced_second = assembler.feed(live, pool, index)
-        self.assertTrue(replaced_first)
-        self.assertFalse(replaced_second)
-        self.assertEqual(second, live)
-        self.assertEqual(index[0], 1)
+        outputs = [assembler.feed(live, pool, index) for _ in range(3)]
+        self.assertTrue(all(replaced for _output, replaced in outputs))
+        rebuilt_payloads = []
+        for output, _replaced in outputs:
+            rebuilt_payloads.append(
+                b"".join(
+                    parse_ace_fragment(frame)["data"]
+                    for frame in split_frames(output)
+                )
+            )
+        self.assertIn(clean_first, rebuilt_payloads[0])
+        self.assertIn(clean_second, rebuilt_payloads[1])
+        self.assertIn(clean_first, rebuilt_payloads[2])
+        self.assertEqual(index[0], 3)
+
+    def test_3366_pool_cycles_in_recorded_order(self):
+        plain = b"HEADER" + MARKER_01_0A_00_09 + (b"\x00" * 10) + b"LIVE"
+        pool_33 = [
+            {"payload": b"AAAA", "source": "3366_09"},
+            {"payload": b"BBBB", "source": "3366_09"},
+        ]
+        index_09 = [0, 0]
+        index_21 = [0, 0]
+        index_01 = [0, 0]
+        outputs = []
+        for _ in range(3):
+            output, replaced = try_replace_3366_4013_plain(
+                plain,
+                pool_33,
+                [],
+                index_09,
+                index_21,
+                index_01,
+            )
+            self.assertTrue(replaced)
+            outputs.append(output)
+        self.assertTrue(outputs[0].endswith(b"AAAA"))
+        self.assertTrue(outputs[1].endswith(b"BBBB"))
+        self.assertTrue(outputs[2].endswith(b"AAAA"))
+        self.assertEqual(index_09, [3, 3])
 
     def test_new_recording_lifecycle_clears_old_pool(self):
         pool = RecordingPool()
