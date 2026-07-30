@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>连接成功</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --bg: #020617;
+      --card-bg: #020617;
+      --accent: #22c55e;
+      --accent-soft: rgba(34, 197, 94, 0.35);
+      --text-main: #e5e7eb;
+      --text-sub: #9ca3af;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(circle at top, #0f172a 0, #020617 55%, #000 100%);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+        "Segoe UI", sans-serif;
+      color: var(--text-main);
+      padding: 16px;
+    }
+    .card {
+      position: relative;
+      max-width: 420px;
+      width: 100%;
+      padding: 28px 22px 20px;
+      border-radius: 16px;
+      background: var(--card-bg);
+      border: 1px solid rgba(148, 163, 184, 0.45);
+      box-shadow:
+        0 24px 40px rgba(15, 23, 42, 0.9),
+        0 0 0 1px rgba(15, 23, 42, 0.9);
+      text-align: center;
+      overflow: hidden;
+    }
+    .glow {
+      position: absolute;
+      inset: -80px;
+      background:
+        radial-gradient(circle at 50% 0%, rgba(34, 197, 94, 0.35), transparent 60%);
+      opacity: 0.9;
+      filter: blur(24px);
+      pointer-events: none;
+      z-index: -1;
+    }
+    .icon {
+      width: 60px;
+      height: 60px;
+      margin: 0 auto 16px;
+      border-radius: 999px;
+      background: radial-gradient(circle at 30% 30%, #bbf7d0, #16a34a);
+      box-shadow: 0 0 20px rgba(34, 197, 94, 0.9);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #022c22;
+      font-size: 32px;
+      font-weight: 700;
+      animation: pulse 1.5s infinite;
+    }
+    h1 {
+      font-size: 28px;
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+    }
+    .subtitle {
+      font-size: 15px;
+      color: var(--text-sub);
+      margin-bottom: 24px;
+      line-height: 1.5;
+    }
+    .divider {
+      height: 1px;
+      background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(148, 163, 184, 0.6),
+        transparent
+      );
+      margin-bottom: 20px;
+    }
+    .token-label {
+      font-size: 14px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-sub);
+      margin-bottom: 10px;
+    }
+    .token-box {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 20px;
+      border-radius: 12px;
+      border: 2px solid var(--accent-soft);
+      background: rgba(15, 23, 42, 0.9);
+      font-family: "JetBrains Mono", Consolas, ui-monospace, SFMono-Regular,
+        Menlo, Monaco, monospace;
+      font-size: 22px;
+      font-weight: bold;
+      color: var(--accent);
+      letter-spacing: 2px;
+    }
+    .token-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 10px var(--accent-soft);
+    }
+    .footer {
+      margin-top: 24px;
+      font-size: 13px;
+      color: var(--text-sub);
+      line-height: 1.5;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50%      { transform: scale(1.08); opacity: 0.75; }
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="glow"></div>
+    <div class="icon">✓</div>
+    <h1>连接成功</h1>
+    <div class="subtitle">
+      你的设备已成功连入本机代理端口。
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="token-label">连接校验值</div>
+    <div class="token-box">
+      <span class="token-dot"></span>
+      <span id="token">LOADING...</span>
+    </div>
+
+    <div class="footer">
+      刷新本页时，校验值应发生变化，用于确认没有走缓存。
+    </div>
+  </div>
+
+  <script>
+    // 生成一个简单的“每次刷新都不一样”的校验值
+    (function () {
+      function randomToken() {
+        // 生成纯数字，长度为6位，方便看
+        return Math.floor(100000 + Math.random() * 900000).toString();
+      }
+      document.getElementById("token").textContent = randomToken();
+    })();
+  </script>
+</body>
+</html>

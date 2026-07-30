@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# 构建输出
+build/
+dist/
+*.egg-info/
+
+# 配置文件（可能含敏感信息）
+config.json
+users.json
+doc/**/client_dh_priv.txt
+
+# 本地抓包/解密样本（可能包含真实 IP、UID 或会话材料）
+/解密
+
+# 日志与临时文件
+*.log
+PyProxyTrafficLogs_*/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
