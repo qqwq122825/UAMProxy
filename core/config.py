@@ -59,10 +59,10 @@ class AppConfig:
         # 运行目录下 PyProxyTrafficLogs_* 详单（TCP≥阈值、3366、01 替换校验）
         "traffic_session_log_enabled": True,
         "traffic_log_min_len": 10,
-        # 01 专项采集模式：开启后录制端口只保存目标账号重组完成的 01 上行帧，
-        # 不生成常规流量详单，也不写入录制池/3366/监控数据。
-        "special_01_capture_mode_enabled": False,
-        "complete_01_uplink_capture_user": "test",
+        # 01/3366 双协议专项采集：原始双向 chunk + 方向字节流 + 完整协议帧，
+        # 不生成常规流量详单，也不写入录制池/监控数据。
+        "special_dual_capture_mode_enabled": False,
+        "special_capture_user": "test",
         # 录制端口空闲超时（秒）：连接超过此时长没有任何数据则主动断开
         # 0 = 不超时（等连接自然断开）；推荐 120~300
         "record_idle_timeout": 180,

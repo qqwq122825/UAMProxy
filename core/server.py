@@ -43,6 +43,7 @@ from core.traffic_session_log import (
     hex_slice_from_01_0a_00_09,
 )
 from core.packet_verify import get_01_packet_verify_summary
+from core.special_capture import special_capture_manager
 
 
 # 暗区突围国服上行首条 10 01 握手总长。
@@ -50,10 +51,10 @@ HS_LEN_AB_BREAKOUT_CN_1001 = 75
 
 
 def _is_special_capture_mode(mode: str) -> bool:
-    """录制端口切换为 01 专项采集；该模式不进入常规录制/详单处理链。"""
+    """录制端口切换为 01/3366 双协议采集，不进入常规录制/详单链。"""
     return (
         mode == "record"
-        and bool(app_config.get("special_01_capture_mode_enabled", False))
+        and bool(app_config.get("special_dual_capture_mode_enabled", False))
     )
 
 
@@ -330,6 +331,14 @@ class Socks5Server:
                    f"[{username}] → {dst_str}")
             ui_mode = "capture" if _is_special_capture_mode(actual_mode) else actual_mode
             log_bus.conn_added.emit(conn_id, conn_id, dst_str, username, ui_mode)
+            if ui_mode == "capture":
+                special_capture_manager.open_connection(
+                    conn_id,
+                    username=username,
+                    client_endpoint=conn_id,
+                    remote_endpoint=dst_str,
+                    hostname=target_host,
+                )
 
             # ④ 本地重放优先检查：命中则跳过真实连接，直接返回本地文件
             # 必须在 _connect_remote 之前，避免无谓的真实连接超时和强制断开报错
@@ -509,6 +518,7 @@ class Socks5Server:
             self._https_block_conns.discard(conn_id)
             self._3366_hs_uid.pop(conn_id, None)
             self._conn_live_gid.pop(conn_id, None)
+            special_capture_manager.close_connection(conn_id)
             
             # 注销多开跟踪
             self._conn_client_writers.pop(conn_id, None)
@@ -761,6 +771,13 @@ class Socks5Server:
                     break
                 counter[0] += 1
 
+                # 专项采集 RAW_TAP：任何解析、拼接、过滤和转发之前保存原始 read。
+                if capture_only:
+                    try:
+                        special_capture_manager.record_chunk(conn_id, direction, data)
+                    except Exception:
+                        _log_exc("special_capture_raw_tap")
+
                 # ── 严格模式 IP 阻断：无录制/无匹配时该 IP 所有通道全部拒绝 ──────────
                 if mode == "replay" and client_ip in self._strict_blocked_ips:
                     log_bus.conn_detail.emit(
@@ -801,7 +818,7 @@ class Socks5Server:
                         pass
 
                 # ── 静默录制：TCP 流重组，提取完整的 01 包 ──────────────────
-                if mode == "record" and (not capture_only or direction == "↑UP"):
+                if mode == "record" and not capture_only:
                     rec_key = f"{conn_id}_rec_{direction}"
                     in_rec_stream = rec_key in self._stream_bufs
                     if in_rec_stream or (len(data) >= 2 and data[0] == 0x01 and data[1] == 0x00):
@@ -826,18 +843,6 @@ class Socks5Server:
                             if pos + pkt_len > len(rec_buf):
                                 break
                             sub = bytes(rec_buf[pos : pos + pkt_len])
-                            if capture_only:
-                                try:
-                                    traffic_file_logger.log_complete_01_uplink_frame(
-                                        conn_id=conn_id,
-                                        client_ip=client_ip,
-                                        data=sub,
-                                        username=username,
-                                    )
-                                except Exception:
-                                    pass
-                                pos += pkt_len
-                                continue
                             # 录制模式向数据流面板发送组装好的单个原始 01 帧（panel②：分包还原/替换前）
                             log_bus.stream_parsed_data.emit(conn_id, direction, "01", len(sub), sub)
                             try:
@@ -849,13 +854,6 @@ class Socks5Server:
                                     data=sub,
                                     username=username,
                                 )
-                                if direction == "↑UP":
-                                    traffic_file_logger.log_complete_01_uplink_frame(
-                                        conn_id=conn_id,
-                                        client_ip=client_ip,
-                                        data=sub,
-                                        username=username,
-                                    )
                             except Exception:
                                 pass
                             
@@ -2083,15 +2081,16 @@ class ProxyEngine:
             d = TrafficSessionLog.ensure_log_dir_ready()
             if d:
                 _event("INFO", "Engine", f"流量详单目录已就绪: {d}")
-            elif app_config.get("special_01_capture_mode_enabled", False):
+            elif app_config.get("special_dual_capture_mode_enabled", False):
                 target_user = (
-                    str(app_config.get("complete_01_uplink_capture_user", "test") or "test")
+                    str(app_config.get("special_capture_user", "test") or "test")
                     .strip()
                 )
+                capture_dir = special_capture_manager.start(target_user)
                 _event(
                     "INFO",
                     "Engine",
-                    f"01 专项采集已就绪：账号={target_user}，常规采集文件已停用",
+                    f"01/3366 双协议专项采集已就绪：账号={target_user}，目录={capture_dir}",
                 )
         except Exception as ex:
             _event("WARN", "Engine", f"清理流量详单目录异常（已跳过）: {ex}")
@@ -2164,6 +2163,9 @@ class ProxyEngine:
             self.running = False
 
     def stop(self):
+        capture_dir = special_capture_manager.stop()
+        if capture_dir:
+            _event("INFO", "Engine", f"专项采集已完成：{capture_dir}")
         if self.server_1080: self.server_1080.stop()
         if self.server_1081: self.server_1081.stop()
         if self.admin_api:

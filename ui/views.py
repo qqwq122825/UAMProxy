@@ -24,6 +24,7 @@ from core.events import log_bus, _event, _fmt_dur
 from core.managers import user_manager, local_map_manager
 from core.pool import recording_pool
 from core.server import engine, _check_external_proxy
+from core.special_capture import special_capture_manager
 
 # 录制池「前16字节」列说明：仅记录 01 0A 00 09/21 块，以 01 0A 00 09 或 0A 00 09 开头
 _REC_ANCHOR_TOOLTIP = {
@@ -775,10 +776,11 @@ class MainWindow(QMainWindow):
         top_v.addLayout(top_bar)
 
         capture_bar = QHBoxLayout()
-        self.cb_capture_mode = QCheckBox("01 专项采集模式")
+        self.cb_capture_mode = QCheckBox("01 / 3366 双协议采集")
         self.cb_capture_mode.setToolTip(
-            "开启后，录制端口只组装并保存目标账号的完整 01 上行帧。\n"
-            "不会生成常规 TCP/01/3366 详单，不写录制池，也不向网络流监控追加数据。\n"
+            "开启后，对目标账号同时保存原始双向 TCP chunk、方向字节流、\n"
+            "完整 01/3366 帧、01 逻辑消息及可解密的 3366 明文。\n"
+            "不会生成常规流量详单，不写录制池，也不向网络流监控追加数据。\n"
             "请在启动代理前开启。"
         )
         self.cb_capture_mode.setStyleSheet(
@@ -790,10 +792,10 @@ class MainWindow(QMainWindow):
         self.edit_capture_user = QLineEdit()
         self.edit_capture_user.setPlaceholderText("test")
         self.edit_capture_user.setFixedWidth(150)
-        self.edit_capture_user.setToolTip("仅保存使用此代理账号登录录制端口的完整 01 上行帧")
+        self.edit_capture_user.setToolTip("仅采集使用此代理账号登录录制端口的双向流量")
         capture_bar.addWidget(self.edit_capture_user)
         self.lbl_capture_hint = QLabel(
-            "输出：01SpecialCapture_时间_账号.json（单一 JSON 文件）"
+            "输出：capture-clean-时间/（原始 chunk + 字节流 + 完整帧）"
         )
         self.lbl_capture_hint.setStyleSheet("color:#64748b;font-size:11px;")
         capture_bar.addWidget(self.lbl_capture_hint)
@@ -801,6 +803,35 @@ class MainWindow(QMainWindow):
         top_v.addLayout(capture_bar)
         self.cb_capture_mode.toggled.connect(self._save_config_from_ui)
         self.edit_capture_user.editingFinished.connect(self._save_config_from_ui)
+
+        timeline_bar = QHBoxLayout()
+        timeline_bar.addWidget(QLabel("对局时间标记:"))
+        self.combo_capture_phase = QComboBox()
+        self.combo_capture_phase.addItem("冷启动", "cold_start")
+        self.combo_capture_phase.addItem("登录完成", "login_complete")
+        self.combo_capture_phase.addItem("大厅", "lobby")
+        self.combo_capture_phase.addItem("开始匹配", "matchmaking")
+        self.combo_capture_phase.addItem("加载", "loading")
+        self.combo_capture_phase.addItem("进入对局", "match_enter")
+        self.combo_capture_phase.addItem("首次移动", "first_move")
+        self.combo_capture_phase.addItem("首次开枪", "first_shot")
+        self.combo_capture_phase.addItem("首次命中", "first_hit")
+        self.combo_capture_phase.addItem("首次击杀", "first_kill")
+        self.combo_capture_phase.addItem("结算", "settlement")
+        self.combo_capture_phase.addItem("返回大厅", "return_lobby")
+        self.combo_capture_phase.setFixedWidth(130)
+        timeline_bar.addWidget(self.combo_capture_phase)
+        self.btn_capture_mark = QPushButton("写入当前标记")
+        self.btn_capture_mark.setToolTip(
+            "按当前时刻写入 timeline.jsonl；无需选择连接或观察数据包"
+        )
+        self.btn_capture_mark.clicked.connect(self._on_capture_timeline_mark)
+        timeline_bar.addWidget(self.btn_capture_mark)
+        self.lbl_capture_mark = QLabel("代理启动后可标记")
+        self.lbl_capture_mark.setStyleSheet("color:#64748b;font-size:11px;")
+        timeline_bar.addWidget(self.lbl_capture_mark)
+        timeline_bar.addStretch()
+        top_v.addLayout(timeline_bar)
 
         rec_summary = QHBoxLayout()
         self.rec_summary_labels: dict[str, QLabel] = {}
@@ -1908,10 +1939,10 @@ class MainWindow(QMainWindow):
         self.cb_replay_strict_match.setChecked(app_config.get("replay_strict_match", True))
         self.spin_01_threshold.setValue(app_config.get("auto_disconnect_01_threshold") or 100)
         self.cb_capture_mode.setChecked(
-            bool(app_config.get("special_01_capture_mode_enabled", False))
+            bool(app_config.get("special_dual_capture_mode_enabled", False))
         )
         self.edit_capture_user.setText(
-            str(app_config.get("complete_01_uplink_capture_user", "test") or "test")
+            str(app_config.get("special_capture_user", "test") or "test")
         )
         self.cb_ext.setChecked(app_config.get("ext_enabled"))
         self.edit_ext_ip.setText(app_config.get("ext_ip"))
@@ -1964,11 +1995,11 @@ class MainWindow(QMainWindow):
         app_config.set("replay_idle_timeout", _idle)
         app_config.set("replay_strict_match", self.cb_replay_strict_match.isChecked())
         app_config.set(
-            "special_01_capture_mode_enabled",
+            "special_dual_capture_mode_enabled",
             self.cb_capture_mode.isChecked(),
         )
         capture_user = self.edit_capture_user.text().strip() or "test"
-        app_config.set("complete_01_uplink_capture_user", capture_user)
+        app_config.set("special_capture_user", capture_user)
         app_config.set("ext_enabled", self.cb_ext.isChecked())
         app_config.set("ext_ip",      self.edit_ext_ip.text().strip())
         app_config.set("ext_port",    self.spin_ext_port.value())
@@ -2009,6 +2040,18 @@ class MainWindow(QMainWindow):
         app_config.save()
 
     # ─── 槽 ─────────────────────────────────
+    def _on_capture_timeline_mark(self):
+        phase = self.combo_capture_phase.currentData()
+        label = self.combo_capture_phase.currentText()
+        if special_capture_manager.mark_timeline(str(phase or "unknown")):
+            self.lbl_capture_mark.setText(
+                f"✓ {datetime.now().strftime('%H:%M:%S.%f')[:-3]} {label}"
+            )
+            self.lbl_capture_mark.setStyleSheet("color:#15803d;font-size:11px;")
+        else:
+            self.lbl_capture_mark.setText("请先开启采集模式并启动代理")
+            self.lbl_capture_mark.setStyleSheet("color:#b45309;font-size:11px;")
+
     def _on_start(self):
         self._save_config_from_ui()   # 启动时顺手保存当前配置
         cfg = {

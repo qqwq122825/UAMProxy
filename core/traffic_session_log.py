@@ -9,11 +9,9 @@
 #   33_downlink.log           — 33 下行帧：前64B密文（用于对照 tcp_raw.log）+ 明文可打印字符串
 #   3366_record_reason.log    — 33 未入池原因（Key未取、解密失败、明文无01切片等）
 #   3366_raw_high_entropy_drop.log — 3366 含 01_0A_00_09/23 的丢包记录
-#   01SpecialCapture_*.json    — 专项采集模式的完整 01 上行帧，JSON 二维字节数组
 # ─────────────────────────────────────────
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -44,15 +42,13 @@ class TrafficSessionLog:
 
     _lock = threading.Lock()
     _dir: str | None = None
-    _json_array_files: set[str] = set()
-    _capture_file: str | None = None
 
     @classmethod
     def enabled(cls) -> bool:
         # 专项采集开启时禁止常规详单落盘；专项文件由独立写入函数处理。
         return (
             bool(app_config.get("traffic_session_log_enabled", True))
-            and not bool(app_config.get("special_01_capture_mode_enabled", False))
+            and not bool(app_config.get("special_dual_capture_mode_enabled", False))
         )
 
     @classmethod
@@ -76,8 +72,6 @@ class TrafficSessionLog:
         base = os.getcwd()
         with cls._lock:
             cls._dir = None
-            cls._json_array_files.clear()
-            cls._capture_file = None
             try:
                 for name in os.listdir(base):
                     if not _RUN_DIR_PATTERN.match(name):
@@ -99,8 +93,6 @@ class TrafficSessionLog:
         """仅清空当前进程内的详单目录句柄，不删磁盘目录（下次写入会新建 PyProxyTrafficLogs_*）。"""
         with cls._lock:
             cls._dir = None
-            cls._json_array_files.clear()
-            cls._capture_file = None
 
     @classmethod
     def ensure_log_dir_ready(cls) -> str | None:
@@ -156,98 +148,6 @@ class TrafficSessionLog:
                     f.write(text)
             except OSError:
                 pass
-
-    @classmethod
-    def _append_json_byte_array(cls, filename: str, data: bytes) -> None:
-        """向始终有效的 JSON 顶层数组追加一条完整帧字节数组。"""
-        if not cls.enabled() or not data:
-            return
-        encoded = json.dumps(list(data), separators=(",", ":")).encode("ascii")
-        with cls._lock:
-            d = cls._ensure_dir()
-            if not d:
-                return
-            path = os.path.join(d, filename)
-            try:
-                if path not in cls._json_array_files or not os.path.exists(path):
-                    with open(path, "wb") as f:
-                        f.write(b"[\n")
-                        f.write(encoded)
-                        f.write(b"\n]\n")
-                    cls._json_array_files.add(path)
-                    return
-
-                with open(path, "r+b") as f:
-                    f.seek(0, os.SEEK_END)
-                    pos = f.tell() - 1
-                    current = b""
-                    while pos >= 0:
-                        f.seek(pos)
-                        current = f.read(1)
-                        if current not in b" \t\r\n":
-                            break
-                        pos -= 1
-                    if pos < 0 or current != b"]":
-                        return
-                    f.seek(pos)
-                    f.write(b",\n")
-                    f.write(encoded)
-                    f.write(b"\n]\n")
-                    f.truncate()
-            except OSError:
-                pass
-
-    @classmethod
-    def _append_capture_byte_array(cls, username: str, data: bytes) -> str | None:
-        """
-        向专项采集文件追加完整帧。
-
-        文件直接位于运行目录，不创建 PyProxyTrafficLogs_* 或 README 等伴随文件；
-        顶层 JSON 数组在每次追加后都保持有效。
-        """
-        if not data:
-            return None
-        encoded = json.dumps(list(data), separators=(",", ":")).encode("ascii")
-        safe_user = re.sub(r"[^0-9A-Za-z_.-]+", "_", username) or "test"
-        with cls._lock:
-            if not cls._capture_file:
-                stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                cls._capture_file = os.path.join(
-                    os.getcwd(), f"01SpecialCapture_{stamp}_{safe_user}.json"
-                )
-            path = cls._capture_file
-            try:
-                if not os.path.exists(path):
-                    with open(path, "wb") as f:
-                        f.write(b"[\n")
-                        f.write(encoded)
-                        f.write(b"\n]\n")
-                    return path
-
-                with open(path, "r+b") as f:
-                    f.seek(0, os.SEEK_END)
-                    pos = f.tell() - 1
-                    current = b""
-                    while pos >= 0:
-                        f.seek(pos)
-                        current = f.read(1)
-                        if current not in b" \t\r\n":
-                            break
-                        pos -= 1
-                    if pos < 0 or current != b"]":
-                        return None
-                    f.seek(pos)
-                    f.write(b",\n")
-                    f.write(encoded)
-                    f.write(b"\n]\n")
-                    f.truncate()
-                return path
-            except OSError:
-                return None
-
-    @classmethod
-    def capture_file_path(cls) -> str | None:
-        return cls._capture_file
 
     # ── 格式化工具 ──────────────────────────────────────────────────
 
@@ -361,30 +261,6 @@ class TrafficSessionLog:
         else:
             body = f"  {cls._wrap_hex(hx)}\n"
         cls._append("01_sliced.log", header + body + "\n")
-
-    @classmethod
-    def log_complete_01_uplink_frame(
-        cls,
-        *,
-        conn_id: str,
-        client_ip: str,
-        data: bytes,
-        username: str = "",
-    ) -> None:
-        """
-        记录指定测试账号的完整 01 上行物理帧。
-
-        调用点位于 TCP 分包组装完成之后，因此 JSON 中每个子数组都是一条完整
-        ``01 00`` 帧；文件整体格式为 ``[[byte, ...], [byte, ...]]``。
-        """
-        if not app_config.get("special_01_capture_mode_enabled", False):
-            return
-        target_user = str(
-            app_config.get("complete_01_uplink_capture_user", "test") or "test"
-        ).strip()
-        if not target_user or username != target_user or not data:
-            return
-        cls._append_capture_byte_array(target_user, bytes(data))
 
     @classmethod
     def log_01_replace(

@@ -41,9 +41,8 @@ from core.crypto import (
 )
 from core.pool import RecordingPool
 from core.protocol_3366 import merge_3366_product_registry
-from core.config import app_config
 from core.managers import UserManager
-from core.traffic_session_log import TrafficSessionLog
+from core.special_capture import SpecialCaptureManager
 
 
 def make_record(selector: int, key_index: int, fill: int, size: int) -> bytes:
@@ -112,73 +111,98 @@ def split_frames(stream: bytes) -> list[bytes]:
 
 
 class ArenaReplayTests(unittest.TestCase):
-    def test_test_user_complete_uplink_frames_are_json_arrays(self):
-        old_dir = TrafficSessionLog._dir
-        old_json_files = TrafficSessionLog._json_array_files
-        old_capture_file = TrafficSessionLog._capture_file
-        old_cwd = os.getcwd()
-        old_enabled = app_config.get("special_01_capture_mode_enabled", False)
-        old_user = app_config.get("complete_01_uplink_capture_user", "test")
-        try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                os.chdir(temp_dir)
-                TrafficSessionLog._dir = None
-                TrafficSessionLog._json_array_files = set()
-                TrafficSessionLog._capture_file = None
-                app_config.set("special_01_capture_mode_enabled", True)
-                app_config.set("complete_01_uplink_capture_user", "test")
-                TrafficSessionLog.log_complete_01_uplink_frame(
-                    conn_id="conn-1",
-                    client_ip="127.0.0.1",
-                    data=b"\x01\x00\x00\x00\x05",
-                    username="test",
-                )
-                TrafficSessionLog.log_complete_01_uplink_frame(
-                    conn_id="conn-1",
-                    client_ip="127.0.0.1",
-                    data=b"\x01\x00\x00\x00\x06\xAA",
-                    username="test",
-                )
-                TrafficSessionLog.log_complete_01_uplink_frame(
-                    conn_id="conn-2",
-                    client_ip="127.0.0.2",
-                    data=b"\x01\x00\x00\x00\x05",
+    def test_dual_capture_keeps_raw_chunks_streams_and_frames(self):
+        def frame_3366(msg: bytes, payload: bytes) -> bytes:
+            header = bytearray(16)
+            header[:8] = b"\x33\x66\x00\x0B\x00\x0C" + msg
+            header[9:13] = (1).to_bytes(4, "big")
+            return bytes(header) + payload
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            capture = SpecialCaptureManager()
+            root = capture.start("test", temp_dir)
+            self.assertFalse(
+                capture.open_connection(
+                    "ignored",
                     username="other",
+                    client_endpoint="127.0.0.2:1000",
+                    remote_endpoint="TARGET:PORT",
                 )
-                TrafficSessionLog.log_tcp_raw(
-                    conn_id="conn-1",
-                    direction="↑UP",
-                    dst="TARGET:PORT",
-                    mode="record",
-                    label="录制",
-                    data=b"this normal traffic log must stay disabled",
+            )
+            self.assertTrue(
+                capture.open_connection(
+                    "proxy-01",
                     username="test",
+                    client_endpoint="127.0.0.1:1001",
+                    remote_endpoint="TARGET:10001",
+                    hostname="TARGET",
                 )
-                self.assertIsNone(TrafficSessionLog.ensure_log_dir_ready())
-                capture_names = [
-                    name for name in os.listdir(temp_dir)
-                    if name.startswith("01SpecialCapture_") and name.endswith("_test.json")
-                ]
-                self.assertEqual(len(capture_names), 1)
-                self.assertFalse(
-                    any(name.startswith("PyProxyTrafficLogs_") for name in os.listdir(temp_dir))
+            )
+            frame01 = b"\x01\x00\x00\x00\x0BABCDEF"
+            capture.record_chunk("proxy-01", "↑UP", frame01[:4])
+            capture.record_chunk("proxy-01", "↑UP", frame01[4:])
+            capture.close_connection("proxy-01")
+
+            self.assertTrue(
+                capture.open_connection(
+                    "proxy-3366",
+                    username="test",
+                    client_endpoint="127.0.0.1:1002",
+                    remote_endpoint="TARGET:3366",
+                    hostname="TARGET",
                 )
-                with open(capture_names[0], "r", encoding="utf-8") as capture_file:
-                    saved = json.load(capture_file)
-                self.assertEqual(
-                    saved,
-                    [
-                        [1, 0, 0, 0, 5],
-                        [1, 0, 0, 0, 6, 170],
-                    ],
-                )
-        finally:
-            os.chdir(old_cwd)
-            TrafficSessionLog._dir = old_dir
-            TrafficSessionLog._json_array_files = old_json_files
-            TrafficSessionLog._capture_file = old_capture_file
-            app_config.set("special_01_capture_mode_enabled", old_enabled)
-            app_config.set("complete_01_uplink_capture_user", old_user)
+            )
+            first3366 = frame_3366(b"\x10\x01", b"HELLO")
+            second3366 = frame_3366(b"\x20\x01", b"WORLD")
+            capture.record_chunk(
+                "proxy-3366", "↑UP", first3366 + second3366
+            )
+            capture.close_connection("proxy-3366")
+            self.assertEqual(capture.stop(), root)
+
+            root_path = os.path.abspath(root)
+            conn01 = os.path.join(
+                root_path, "flows", "protocol-01", "conn-0001"
+            )
+            conn3366 = os.path.join(
+                root_path, "flows", "protocol-3366", "conn-0002"
+            )
+            self.assertTrue(os.path.isdir(conn01))
+            self.assertTrue(os.path.isdir(conn3366))
+            with open(
+                os.path.join(conn01, "chunks.jsonl"), encoding="utf-8"
+            ) as f:
+                chunks = [json.loads(line) for line in f if line.strip()]
+            self.assertEqual([row["streamOffset"] for row in chunks], [0, 4])
+            self.assertTrue(all(row["modified"] is False for row in chunks))
+            with open(os.path.join(conn01, "c2s.raw.bin"), "rb") as f:
+                self.assertEqual(f.read(), frame01)
+            with open(
+                os.path.join(conn01, "frames.jsonl"), encoding="utf-8"
+            ) as f:
+                frames01 = [json.loads(line) for line in f if line.strip()]
+            self.assertEqual(len(frames01), 1)
+            self.assertEqual(frames01[0]["sourceChunkIds"], [1, 2])
+            with open(
+                os.path.join(conn01, frames01[0]["rawFile"]), "rb"
+            ) as f:
+                self.assertEqual(f.read(), frame01)
+            with open(
+                os.path.join(conn3366, "frames.jsonl"), encoding="utf-8"
+            ) as f:
+                frames3366 = [json.loads(line) for line in f if line.strip()]
+            self.assertEqual(frames3366[0]["messageTypeHex"], "1001")
+            self.assertEqual(frames3366[0]["parseStatus"], "complete")
+            self.assertTrue(os.path.isfile(os.path.join(root_path, "checksums.sha256")))
+            with open(
+                os.path.join(root_path, "integrity-report.json"), encoding="utf-8"
+            ) as f:
+                report = json.load(f)
+            self.assertEqual(report["status"], "pass")
+            self.assertTrue(report["rawForwardHashesMatch"])
+            self.assertFalse(
+                any(name.startswith("PyProxyTrafficLogs_") for name in os.listdir(temp_dir))
+            )
 
     def test_user_manager_batch_delete(self):
         with tempfile.TemporaryDirectory() as temp_dir:

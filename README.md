@@ -60,17 +60,27 @@ python main.py --headless
 | `record_idle_timeout` | 180 | 录制空闲断开秒数 |
 | `auto_disconnect_01_threshold` | 100 | 录制模板阈值 |
 | `replay_strict_match` | true | 账户无匹配池时严格处理 |
-| `special_01_capture_mode_enabled` | false | 01 专项采集模式；开启后不生成其它采集文件或录制池 |
-| `complete_01_uplink_capture_user` | test | 专项采集的录制端口代理账号 |
+| `special_dual_capture_mode_enabled` | false | 01/3366 双协议专项采集；开启后不生成常规详单或录制池 |
+| `special_capture_user` | test | 专项采集的录制端口代理账号 |
 | `az_dl_intercept_enabled` | false | 暗区 33 下行字符串拦截 |
 | `dl_01_block_enabled` | false | 暗区 01 下行大包拦截 |
 | `ace_chunk_block_enabled` | false | 暗区下行块填充 |
 | `ul_dirty_clean_enabled` | false | 暗区上行脏数据清除 |
 
-开启“01 专项采集模式”后，录制端口仅对目标账号组装完整的 01 上行帧，
-并在运行目录生成一个 `01SpecialCapture_<时间>_<账号>.json` 文件。
-文件内容为 `[[帧1字节...], [帧2字节...]]`；常规 TCP/01/3366 详单、
-录制池数据和网络流监控数据均不生成。
+开启“01 / 3366 双协议采集”后，录制端口会为目标账号创建
+`capture-clean-<时间>/` 会话目录，同时保存：
+
+- 每次代理读取的双向原始 TCP chunk、SHA256 与真实交错顺序；
+- 每条连接的 `c2s.raw.bin`、`s2c.raw.bin` 连续字节流；
+- TCP 拼接后切出的完整 01、3366 帧；
+- 01 应用层分片重组后的逻辑消息；
+- 3366 的会话密钥上下文、4013 密文及成功解密的明文；
+- `session.json`、`timeline.jsonl`、完整性报告及 `checksums.sha256`。
+
+采集链路保持原样转发，常规流量详单、录制池数据和网络流监控数据均不生成。
+SOCKS5 应用层代理不具备 TCP 序号、UDP 和设备全量包视角，因此会在
+`session.json` 与完整性报告中明确标记 `pcapngAvailable=false`，不会生成占位
+pcapng。
 
 3366 产品注册表只保留暗区突围国服：
 
