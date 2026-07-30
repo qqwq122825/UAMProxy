@@ -115,13 +115,17 @@ class ArenaReplayTests(unittest.TestCase):
     def test_test_user_complete_uplink_frames_are_json_arrays(self):
         old_dir = TrafficSessionLog._dir
         old_json_files = TrafficSessionLog._json_array_files
-        old_enabled = app_config.get("complete_01_uplink_capture_enabled", True)
+        old_capture_file = TrafficSessionLog._capture_file
+        old_cwd = os.getcwd()
+        old_enabled = app_config.get("special_01_capture_mode_enabled", False)
         old_user = app_config.get("complete_01_uplink_capture_user", "test")
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
-                TrafficSessionLog._dir = temp_dir
+                os.chdir(temp_dir)
+                TrafficSessionLog._dir = None
                 TrafficSessionLog._json_array_files = set()
-                app_config.set("complete_01_uplink_capture_enabled", True)
+                TrafficSessionLog._capture_file = None
+                app_config.set("special_01_capture_mode_enabled", True)
                 app_config.set("complete_01_uplink_capture_user", "test")
                 TrafficSessionLog.log_complete_01_uplink_frame(
                     conn_id="conn-1",
@@ -141,11 +145,25 @@ class ArenaReplayTests(unittest.TestCase):
                     data=b"\x01\x00\x00\x00\x05",
                     username="other",
                 )
-                with open(
-                    os.path.join(temp_dir, "01_uplink_frames_test.json"),
-                    "r",
-                    encoding="utf-8",
-                ) as capture_file:
+                TrafficSessionLog.log_tcp_raw(
+                    conn_id="conn-1",
+                    direction="↑UP",
+                    dst="TARGET:PORT",
+                    mode="record",
+                    label="录制",
+                    data=b"this normal traffic log must stay disabled",
+                    username="test",
+                )
+                self.assertIsNone(TrafficSessionLog.ensure_log_dir_ready())
+                capture_names = [
+                    name for name in os.listdir(temp_dir)
+                    if name.startswith("01SpecialCapture_") and name.endswith("_test.json")
+                ]
+                self.assertEqual(len(capture_names), 1)
+                self.assertFalse(
+                    any(name.startswith("PyProxyTrafficLogs_") for name in os.listdir(temp_dir))
+                )
+                with open(capture_names[0], "r", encoding="utf-8") as capture_file:
                     saved = json.load(capture_file)
                 self.assertEqual(
                     saved,
@@ -155,9 +173,11 @@ class ArenaReplayTests(unittest.TestCase):
                     ],
                 )
         finally:
+            os.chdir(old_cwd)
             TrafficSessionLog._dir = old_dir
             TrafficSessionLog._json_array_files = old_json_files
-            app_config.set("complete_01_uplink_capture_enabled", old_enabled)
+            TrafficSessionLog._capture_file = old_capture_file
+            app_config.set("special_01_capture_mode_enabled", old_enabled)
             app_config.set("complete_01_uplink_capture_user", old_user)
 
     def test_user_manager_batch_delete(self):

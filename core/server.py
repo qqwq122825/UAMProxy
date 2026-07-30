@@ -49,6 +49,14 @@ from core.packet_verify import get_01_packet_verify_summary
 HS_LEN_AB_BREAKOUT_CN_1001 = 75
 
 
+def _is_special_capture_mode(mode: str) -> bool:
+    """录制端口切换为 01 专项采集；该模式不进入常规录制/详单处理链。"""
+    return (
+        mode == "record"
+        and bool(app_config.get("special_01_capture_mode_enabled", False))
+    )
+
+
 def _format_01_replace_mode_label(detail: dict) -> str:
     """
     01 重放替换日志首段的策略说明（中文）。
@@ -249,11 +257,17 @@ class Socks5Server:
                     # 后续并发连接只记录 DEBUG 级别（不污染主日志）
 
                     # 鉴权成功后启动录制会话（AUTH_OK 之后，保证日志顺序正确）
-                    if actual_mode == "record":
+                    if actual_mode == "record" and not _is_special_capture_mode(actual_mode):
                         _is_new_rec = recording_pool.new_session(client_ip)
                         _rec_joined = True
                         if _is_new_rec:
                             _event("RECORD", self.label, f"[{client_ip}] 开始录制会话")
+                    elif _is_special_capture_mode(actual_mode) and is_first_conn:
+                        _event(
+                            "RECORD",
+                            self.label,
+                            f"[{client_ip}] 01 专项采集会话开始（仅保存目标账号完整上行帧）",
+                        )
 
                     # ── 重放端口：仅首条连接打上线日志 ────
                     if actual_mode == "replay" and is_first_conn:
@@ -314,7 +328,8 @@ class Socks5Server:
             dst_str = f"{target_host}:{target_port}"
             _event("CONNECT", self.label,
                    f"[{username}] → {dst_str}")
-            log_bus.conn_added.emit(conn_id, conn_id, dst_str, username, actual_mode)
+            ui_mode = "capture" if _is_special_capture_mode(actual_mode) else actual_mode
+            log_bus.conn_added.emit(conn_id, conn_id, dst_str, username, ui_mode)
 
             # ④ 本地重放优先检查：命中则跳过真实连接，直接返回本地文件
             # 必须在 _connect_remote 之前，避免无谓的真实连接超时和强制断开报错
@@ -435,7 +450,7 @@ class Socks5Server:
 
             self._total_up_pkts += up_count[0]
             self._total_dn_pkts += dn_count[0]
-            if actual_mode == "record":
+            if _rec_joined:
                 # 引用计数 -1；所有连接都断开时才真正停止（rec_total > 0）
                 rec_total, game_id = recording_pool.stop(client_ip)
                 _rec_joined = False  # 已正常 stop，finally 不再重复调用
@@ -621,6 +636,7 @@ class Socks5Server:
         dst_str: str = "",
         shared_ts: list = None,
     ):
+        capture_only = _is_special_capture_mode(mode)
 
         def _emit_progress_detail(conn_id: str, client_ip: str) -> None:
             """汇总 01/33 进度并发送 detail 信号（33 细分 09/21/01回退）"""
@@ -755,31 +771,37 @@ class Socks5Server:
                 # ── HTTPS 下行拦截：服务器下发数据直接丢弃，不转发给客户端 ──────────────
                 # 连接本身已放行（CONNECT 未被拒绝），客户端请求可以到达服务器；
                 # 服务器响应（↓DOWN）在此被吞掉，客户端收不到文件数据，下载自然失败。
-                if direction == "↓DOWN" and conn_id in self._https_block_conns:
+                if (
+                    not capture_only
+                    and direction == "↓DOWN"
+                    and conn_id in self._https_block_conns
+                ):
                     log_bus.dl_intercept_log.emit(
                         f"[{conn_id}] HTTPS 下行数据丢弃 {len(data)}B ← {dst_str or '?'}"
                     )
                     continue  # 不写给客户端，读下一块
 
                 # ── 发送原始抓包数据 (TCP 流，无处理) ──
-                log_bus.stream_raw_data.emit(conn_id, direction, len(data), data)
+                if not capture_only:
+                    log_bus.stream_raw_data.emit(conn_id, direction, len(data), data)
 
                 # ── 记录所有经过代理的原始 TCP 数据（未分包前，长度≥traffic_log_min_len）
-                try:
-                    traffic_file_logger.log_tcp_chunk(
-                        conn_id=conn_id,
-                        direction=direction,
-                        dst=dst_str or "?",
-                        mode=mode,
-                        label=self.label,
-                        data=data,
-                        username=username,
-                    )
-                except Exception:
-                    pass
+                if not capture_only:
+                    try:
+                        traffic_file_logger.log_tcp_chunk(
+                            conn_id=conn_id,
+                            direction=direction,
+                            dst=dst_str or "?",
+                            mode=mode,
+                            label=self.label,
+                            data=data,
+                            username=username,
+                        )
+                    except Exception:
+                        pass
 
                 # ── 静默录制：TCP 流重组，提取完整的 01 包 ──────────────────
-                if mode == "record":
+                if mode == "record" and (not capture_only or direction == "↑UP"):
                     rec_key = f"{conn_id}_rec_{direction}"
                     in_rec_stream = rec_key in self._stream_bufs
                     if in_rec_stream or (len(data) >= 2 and data[0] == 0x01 and data[1] == 0x00):
@@ -804,6 +826,18 @@ class Socks5Server:
                             if pos + pkt_len > len(rec_buf):
                                 break
                             sub = bytes(rec_buf[pos : pos + pkt_len])
+                            if capture_only:
+                                try:
+                                    traffic_file_logger.log_complete_01_uplink_frame(
+                                        conn_id=conn_id,
+                                        client_ip=client_ip,
+                                        data=sub,
+                                        username=username,
+                                    )
+                                except Exception:
+                                    pass
+                                pos += pkt_len
+                                continue
                             # 录制模式向数据流面板发送组装好的单个原始 01 帧（panel②：分包还原/替换前）
                             log_bus.stream_parsed_data.emit(conn_id, direction, "01", len(sub), sub)
                             try:
@@ -1175,10 +1209,14 @@ class Socks5Server:
                             self._stream_bufs.pop(rep_key, None)
 
                 # ── 33 66：切帧、Hex、录制、首下行 Key/IV、产品 ID（如 00 00 09 4E）──
-                st3366 = (
-                    self._st3366_down if direction == "↓DOWN" else self._st3366_up
-                ).setdefault(conn_id, Conn3366State())
-                need_3366 = bool(st3366.buf) or (_find_valid_magic(data, 0) >= 0)
+                if capture_only:
+                    st3366 = None
+                    need_3366 = False
+                else:
+                    st3366 = (
+                        self._st3366_down if direction == "↓DOWN" else self._st3366_up
+                    ).setdefault(conn_id, Conn3366State())
+                    need_3366 = bool(st3366.buf) or (_find_valid_magic(data, 0) >= 0)
 
                 # 在进入 3366 组装前，先处理外层包裹（如果它是 01 包，前面可能带有 01 00 xx xx 的头）
                 # 由于之前的流缓冲区已经合并了 01 包，如果 data 本身就是带有外层头的（例如 01 xx... + 33 66），
@@ -1778,10 +1816,21 @@ class Socks5Server:
                         is_01_handled = True
                         
                 # 注意：如果之前有半截数据在流里面（in_01_stream），哪怕现在进来的包不是以 01 00 开头，它也属于 01 协议流的后续部分，已经被上方 emit 过了
-                if data and not need_3366 and not in_01_stream and not is_01_handled:
+                if (
+                    data
+                    and not capture_only
+                    and not need_3366
+                    and not in_01_stream
+                    and not is_01_handled
+                ):
                     log_bus.stream_parsed_data.emit(conn_id, direction, "透传", len(data), data)
                 # 3366 原始含 01 0A 00 09 或 01 0A 00 23 时不发送，但会记录
-                if data and app_config.get("drop_3366_raw_high_entropy") and _find_valid_magic(data, 0) >= 0:
+                if (
+                    data
+                    and not capture_only
+                    and app_config.get("drop_3366_raw_high_entropy")
+                    and _find_valid_magic(data, 0) >= 0
+                ):
                     def _on_drop(frame: bytes, msg_hex: str):
                         _event("RECORD", self.label,
                                f"[{client_ip}] 3366 含01_0A_00_09/23 已丢包 msg={msg_hex} len={len(frame)}B")
@@ -1832,12 +1881,14 @@ class Socks5Server:
                             conn_label=conn_label,
                         )
                         if out_data:
-                            log_bus.stream_sent_data.emit(conn_id, direction, len(out_data), out_data)
+                            if not capture_only:
+                                log_bus.stream_sent_data.emit(conn_id, direction, len(out_data), out_data)
                             writer.write(out_data)
                             await writer.drain()
                         # else: 帧不完整，暂留缓冲区等下次 read
                     else:
-                        log_bus.stream_sent_data.emit(conn_id, direction, len(data), data)
+                        if not capture_only:
+                            log_bus.stream_sent_data.emit(conn_id, direction, len(data), data)
                         writer.write(data)
                         await writer.drain()
         except Exception:
@@ -2032,6 +2083,16 @@ class ProxyEngine:
             d = TrafficSessionLog.ensure_log_dir_ready()
             if d:
                 _event("INFO", "Engine", f"流量详单目录已就绪: {d}")
+            elif app_config.get("special_01_capture_mode_enabled", False):
+                target_user = (
+                    str(app_config.get("complete_01_uplink_capture_user", "test") or "test")
+                    .strip()
+                )
+                _event(
+                    "INFO",
+                    "Engine",
+                    f"01 专项采集已就绪：账号={target_user}，常规采集文件已停用",
+                )
         except Exception as ex:
             _event("WARN", "Engine", f"清理流量详单目录异常（已跳过）: {ex}")
         ext = None

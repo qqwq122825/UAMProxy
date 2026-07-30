@@ -773,6 +773,35 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.btn_rec_import)
         top_bar.addWidget(self.btn_rec_clear)
         top_v.addLayout(top_bar)
+
+        capture_bar = QHBoxLayout()
+        self.cb_capture_mode = QCheckBox("01 专项采集模式")
+        self.cb_capture_mode.setToolTip(
+            "开启后，录制端口只组装并保存目标账号的完整 01 上行帧。\n"
+            "不会生成常规 TCP/01/3366 详单，不写录制池，也不向网络流监控追加数据。\n"
+            "请在启动代理前开启。"
+        )
+        self.cb_capture_mode.setStyleSheet(
+            "QCheckBox{font-weight:700;color:#b45309;padding:4px 0;}"
+        )
+        capture_bar.addWidget(self.cb_capture_mode)
+        capture_bar.addSpacing(12)
+        capture_bar.addWidget(QLabel("采集账号:"))
+        self.edit_capture_user = QLineEdit()
+        self.edit_capture_user.setPlaceholderText("test")
+        self.edit_capture_user.setFixedWidth(150)
+        self.edit_capture_user.setToolTip("仅保存使用此代理账号登录录制端口的完整 01 上行帧")
+        capture_bar.addWidget(self.edit_capture_user)
+        self.lbl_capture_hint = QLabel(
+            "输出：01SpecialCapture_时间_账号.json（单一 JSON 文件）"
+        )
+        self.lbl_capture_hint.setStyleSheet("color:#64748b;font-size:11px;")
+        capture_bar.addWidget(self.lbl_capture_hint)
+        capture_bar.addStretch()
+        top_v.addLayout(capture_bar)
+        self.cb_capture_mode.toggled.connect(self._save_config_from_ui)
+        self.edit_capture_user.editingFinished.connect(self._save_config_from_ui)
+
         rec_summary = QHBoxLayout()
         self.rec_summary_labels: dict[str, QLabel] = {}
         for key, title in (
@@ -1878,6 +1907,12 @@ class MainWindow(QMainWindow):
         self.spin_record_idle_timeout.setValue(app_config.get("record_idle_timeout") or 180)
         self.cb_replay_strict_match.setChecked(app_config.get("replay_strict_match", True))
         self.spin_01_threshold.setValue(app_config.get("auto_disconnect_01_threshold") or 100)
+        self.cb_capture_mode.setChecked(
+            bool(app_config.get("special_01_capture_mode_enabled", False))
+        )
+        self.edit_capture_user.setText(
+            str(app_config.get("complete_01_uplink_capture_user", "test") or "test")
+        )
         self.cb_ext.setChecked(app_config.get("ext_enabled"))
         self.edit_ext_ip.setText(app_config.get("ext_ip"))
         self.spin_ext_port.setValue(app_config.get("ext_port"))
@@ -1928,6 +1963,12 @@ class MainWindow(QMainWindow):
         app_config.set("record_idle_timeout", _idle)
         app_config.set("replay_idle_timeout", _idle)
         app_config.set("replay_strict_match", self.cb_replay_strict_match.isChecked())
+        app_config.set(
+            "special_01_capture_mode_enabled",
+            self.cb_capture_mode.isChecked(),
+        )
+        capture_user = self.edit_capture_user.text().strip() or "test"
+        app_config.set("complete_01_uplink_capture_user", capture_user)
         app_config.set("ext_enabled", self.cb_ext.isChecked())
         app_config.set("ext_ip",      self.edit_ext_ip.text().strip())
         app_config.set("ext_port",    self.spin_ext_port.value())
@@ -2360,6 +2401,10 @@ class MainWindow(QMainWindow):
     def _update_row_mode_and_id(self, ip: str, row: int) -> tuple[str, int]:
         rec_cnt = self._ip_rec_active.get(ip, 0)
         rep_cnt = self._ip_rep_active.get(ip, 0)
+        capture_active = any(
+            info[0] == ip and len(info) > 1 and info[1] == "专项采集"
+            for info in self._conn_info.values()
+        )
         
         rec_id = self._ip_rec_game_id.get(ip, "")
         rep_id = self._ip_rep_game_id.get(ip, "")
@@ -2384,8 +2429,8 @@ class MainWindow(QMainWindow):
                 else:
                     display_id, id_tip = "—", ""
         elif rec_cnt > 0:
-            display_mode = "录制"
-            mode_color = "#ef4444"
+            display_mode = "专项采集" if capture_active else "录制"
+            mode_color = "#d97706" if capture_active else "#ef4444"
             display_id, id_tip = (
                 self._display_account_game_cell(rec_id, ip, lookup)
                 if rec_id
@@ -2476,6 +2521,8 @@ class MainWindow(QMainWindow):
         
         if actual_mode == "record":
             mode = "录制"
+        elif actual_mode == "capture":
+            mode = "专项采集"
         elif actual_mode == "replay":
             mode = "重放"
         else:
@@ -2502,7 +2549,7 @@ class MainWindow(QMainWindow):
         self._ip_active[ip] = prev_active + 1
         self._ip_total[ip]  = self._ip_total.get(ip, 0) + 1
         
-        if mode == "录制":
+        if mode in ("录制", "专项采集"):
             self._ip_rec_active[ip] = self._ip_rec_active.get(ip, 0) + 1
         else:
             self._ip_rep_active[ip] = self._ip_rep_active.get(ip, 0) + 1
@@ -2520,7 +2567,7 @@ class MainWindow(QMainWindow):
         self._set_cell(row, 5, str(self._ip_total[ip]))
         self._set_cell(row, 6, str(self._ip_active[ip]))
         # 重放进度列：纯录制模式清空缓存并显示 —，重放/实时重放模式保留或恢复缓存
-        if display_mode == "录制":
+        if display_mode in ("录制", "专项采集"):
             self._ip_replay_progress.pop(ip, None)
             self._ip_replay_progress_detail.pop(ip, None)
             self._set_cell(row, 7, "—", color="#666666")
@@ -2552,7 +2599,7 @@ class MainWindow(QMainWindow):
         self._ip_last_active[ip] = now
         self._ip_active[ip] = max(0, self._ip_active.get(ip, 1) - 1)
         
-        if mode == "录制":
+        if mode in ("录制", "专项采集"):
             self._ip_rec_active[ip] = max(0, self._ip_rec_active.get(ip, 1) - 1)
         else:
             self._ip_rep_active[ip] = max(0, self._ip_rep_active.get(ip, 1) - 1)
@@ -2564,7 +2611,7 @@ class MainWindow(QMainWindow):
         display_mode, rep_cnt = self._update_row_mode_and_id(ip, row)
 
         # 切回纯录制模式时清空重放进度缓存和进度列
-        if display_mode == "录制" and rep_cnt == 0:
+        if display_mode in ("录制", "专项采集") and rep_cnt == 0:
             self._ip_replay_progress.pop(ip, None)
             self._ip_replay_progress_detail.pop(ip, None)
             self._set_cell(row, 7, "—", color="#666666")
