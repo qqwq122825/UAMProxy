@@ -27,5 +27,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: UAMProxy-Windows
-          path: dist/UAMProxy_v*.exe
+          path: |
+            dist/UAMProxy_v*.exe
+            dist/UAMProxy_v*.build.json
           if-no-files-found: error

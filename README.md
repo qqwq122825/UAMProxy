@@ -49,6 +49,17 @@ python main.py
 python main.py --headless
 ```
 
+Windows 打包：
+
+```bash
+python build_slim.py
+```
+
+发布版本由 `ui/views.py` 的 `APP_VERSION` 明确维护，打包脚本不再自动
+对版本号 `+1`。产物名包含版本和 Git 提交，例如
+`UAMProxy_v1.102_d07beab.exe`；同时生成 `.build.json`，其中包含打包时间和
+EXE SHA256。窗口标题也会显示同一 Git 提交号。
+
 ## 关键配置
 
 数据默认保存到 `C:\PyProxyApp\`。

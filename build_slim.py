@@ -19,31 +19,77 @@ import re
 import shutil
 import subprocess
 import glob
+import datetime
+import hashlib
+import json
 
 APP_NAME   = "UAMProxy"
 ENTRY_FILE = "main.py"
 ICON_FILE  = None  # 填 .ico 路径，如 "assets/icon.ico"
 
 VIEWS_FILE = os.path.join(os.path.dirname(__file__), "ui", "views.py")
+BUILD_INFO_FILE = os.path.join(os.path.dirname(__file__), "core", "build_info.py")
 _VER_RE    = re.compile(r'^(APP_VERSION\s*=\s*["\'])v(\d+)\.(\d+)(["\'])', re.MULTILINE)
 
 
-def bump_version() -> str:
-    """读取 ui/views.py 中的 APP_VERSION，小版本号 +1 后写回，返回新版本字符串。"""
+def read_version() -> str:
+    """读取源码中明确声明的发布版本；打包不再自动改源码。"""
     with open(VIEWS_FILE, "r", encoding="utf-8") as f:
         src = f.read()
     m = _VER_RE.search(src)
     if not m:
         print("[WARN] 未找到 APP_VERSION，跳过版本号更新")
         return "unknown"
-    major, minor = int(m.group(2)), int(m.group(3))
-    new_minor = minor + 1
-    new_ver   = f"v{major}.{new_minor}"
-    new_line  = f'{m.group(1)}{new_ver}{m.group(4)}'
-    src = _VER_RE.sub(new_line, src, count=1)
-    with open(VIEWS_FILE, "w", encoding="utf-8") as f:
-        f.write(src)
-    return new_ver
+    return f"v{int(m.group(2))}.{int(m.group(3))}"
+
+
+def git_short_sha() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short=8", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip() or "nogit"
+    except Exception:
+        return "nogit"
+
+
+def write_build_info(git_sha: str, build_time: str) -> bytes | None:
+    """临时写入打包元数据，返回原文件内容供打包后恢复。"""
+    original = None
+    if os.path.exists(BUILD_INFO_FILE):
+        with open(BUILD_INFO_FILE, "rb") as f:
+            original = f.read()
+    content = (
+        '"""Auto-generated temporarily by build_slim.py."""\n\n'
+        f"BUILD_GIT_SHA = {git_sha!r}\n"
+        f"BUILD_TIME_UTC = {build_time!r}\n"
+    )
+    with open(BUILD_INFO_FILE, "w", encoding="utf-8") as f:
+        f.write(content)
+    return original
+
+
+def restore_build_info(original: bytes | None) -> None:
+    if original is None:
+        try:
+            os.remove(BUILD_INFO_FILE)
+        except FileNotFoundError:
+            pass
+        return
+    with open(BUILD_INFO_FILE, "wb") as f:
+        f.write(original)
+
+
+def file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
 
 # ──────────────────────────────────────────────────────────────
 # PySide6 安装目录
@@ -291,10 +337,13 @@ exe = EXE(
 
 
 def main():
-    new_ver = bump_version()
+    new_ver = read_version()
+    git_sha = git_short_sha()
+    build_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    original_build_info = write_build_info(git_sha, build_time)
     # 版本号中 "v1.2" → 文件名用 "v1.2"，去掉不合法字符
     ver_tag  = new_ver.replace(" ", "_")
-    exe_name = f"{APP_NAME}_{ver_tag}"   # e.g. UAMProxy_v1.2
+    exe_name = f"{APP_NAME}_{ver_tag}_{git_sha}"
 
     print("=" * 55)
     print(f"  UAMProxy 暗区专项打包 (Slim Build)  {new_ver}")
@@ -317,10 +366,13 @@ def main():
     spec_path = write_spec(bins, exe_name)
     print(f"[3/4] 生成 spec 文件: {spec_path}")
 
-    result = subprocess.run(
-        [sys.executable, "-m", "PyInstaller", "--clean", spec_path],
-        text=True
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "PyInstaller", "--clean", spec_path],
+            text=True
+        )
+    finally:
+        restore_build_info(original_build_info)
     if result.returncode != 0:
         print("\n[ERROR] 打包失败！")
         sys.exit(1)
@@ -331,8 +383,28 @@ def main():
         sys.exit(1)
 
     mb = os.path.getsize(exe_path) / 1024 / 1024
+    exe_sha256 = file_sha256(exe_path)
+    manifest_path = os.path.join("dist", f"{exe_name}.build.json")
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "app": APP_NAME,
+                "version": new_ver,
+                "gitSha": git_sha,
+                "buildTimeUtc": build_time,
+                "exe": os.path.basename(exe_path),
+                "exeSha256": exe_sha256,
+                "sizeBytes": os.path.getsize(exe_path),
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
     print(f"\n[4/4] 打包完成！")
     print(f"  产物路径 : {os.path.abspath(exe_path)}")
+    print(f"  Git 提交 : {git_sha}")
+    print(f"  SHA256    : {exe_sha256}")
+    print(f"  构建清单 : {os.path.abspath(manifest_path)}")
     print(f"  文件大小 : {mb:.1f} MB")
     # 列出 dist/ 下所有历史版本
     all_exes = sorted(glob.glob(os.path.join("dist", f"{APP_NAME}_v*.exe")))

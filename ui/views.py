@@ -4,6 +4,7 @@ import time
 from datetime import datetime, date
 import asyncio
 import threading
+from core.build_info import BUILD_GIT_SHA, BUILD_TIME_UTC
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -16,7 +17,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QObject, QDate, QTimer, QUrl
 from PySide6.QtGui import QColor, QFont, QTextCursor, QDesktopServices
 
-APP_VERSION = "v1.100"
+APP_VERSION = "v1.102"
 
 from core.config import app_config
 from core.ace_display import build_ace_identifier_lookup, ace_identifier_display
@@ -351,7 +352,13 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"UAMProxy {APP_VERSION}  |  暗区突围专项代理")
+        build_tag = f" [{BUILD_GIT_SHA}]" if BUILD_GIT_SHA != "dev" else ""
+        self.setWindowTitle(
+            f"UAMProxy {APP_VERSION}{build_tag}  |  暗区突围专项代理"
+        )
+        self.setToolTip(
+            f"版本: {APP_VERSION}\nGit: {BUILD_GIT_SHA}\n打包时间(UTC): {BUILD_TIME_UTC}"
+        )
         self.resize(1150, 740)
         
         # Apply modern global stylesheet
