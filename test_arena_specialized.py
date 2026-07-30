@@ -168,6 +168,11 @@ class ArenaReplayTests(unittest.TestCase):
             )
             capture.close_connection("proxy-3366")
             self.assertEqual(capture.stop(), root)
+            self.assertEqual(capture.last_status, "valid")
+            self.assertTrue(os.path.isfile(capture.last_archive_path))
+            self.assertTrue(
+                os.path.isfile(capture.last_archive_path + ".sha256")
+            )
 
             root_path = os.path.abspath(root)
             conn01 = os.path.join(
@@ -264,6 +269,7 @@ class ArenaReplayTests(unittest.TestCase):
             frame = b"\x01\x00\x00\x00\x05"
             capture.record_chunk("one-way", "c2s", frame)
             capture.stop()
+            self.assertEqual(capture.last_status, "invalid")
             with open(os.path.join(root, "anomalies.jsonl"), encoding="utf-8") as f:
                 anomalies = [json.loads(line) for line in f if line.strip()]
             self.assertEqual(anomalies[0]["type"], "ONE_DIRECTION_MISSING")
@@ -273,6 +279,39 @@ class ArenaReplayTests(unittest.TestCase):
             )
             with open(raw_path, "rb") as f:
                 self.assertEqual(f.read(), frame)
+
+    def test_capture_copies_reused_buffer_and_verifies_large_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            capture = SpecialCaptureManager()
+            root = capture.start("test", temp_dir)
+            capture.open_connection(
+                "buffer-reuse",
+                username="test",
+                client_endpoint="127.0.0.1:1004",
+                remote_endpoint="TARGET:PORT",
+            )
+            original = bytes(range(256)) * 32
+            pooled = bytearray(original)
+            capture.record_chunk("buffer-reuse", "c2s", pooled)
+            pooled[:] = b"\x00" * len(pooled)
+            capture.record_chunk(
+                "buffer-reuse", "s2c", b"\xA5" * 8192
+            )
+            capture.stop()
+            conn = os.path.join(root, "unclassified", "conn-0001")
+            with open(
+                os.path.join(conn, "chunks", "chunk-000001.c2s.bin"), "rb"
+            ) as f:
+                self.assertEqual(f.read(), original)
+            with open(os.path.join(conn, "c2s.raw.bin"), "rb") as f:
+                self.assertEqual(f.read(), original)
+            with open(
+                os.path.join(root, "integrity-report.json"), encoding="utf-8"
+            ) as f:
+                report = json.load(f)
+            self.assertEqual(report["writerErrors"], [])
+            self.assertEqual(report["streamContentMismatches"], [])
+            self.assertEqual(report["sparseOutputFiles"], [])
 
     def test_product_registry_is_arena_only(self):
         registry = merge_3366_product_registry({

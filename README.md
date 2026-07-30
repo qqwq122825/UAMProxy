@@ -87,6 +87,12 @@ SOCKS5 应用层代理不具备 TCP 序号、UDP 和设备全量包视角，因�
 `session.json` 与完整性报告中明确标记 `pcapngAvailable=false`，不会生成占位
 pcapng。
 
+专项写盘使用“不可变字节副本 → 临时文件完整写入 → flush/fsync → 读回
+SHA256 → 原子替换”。方向连续流在每次追加后读回刚写入范围；停止采集时再次
+核对 chunk 拼接结果、方向 raw 流、frame 引用及文本 NUL，并写入
+`sessionStatus=valid|invalid`。自检完成后还会生成同名 `.zip` 和
+`.zip.sha256`，跨电脑时优先传输这个 ZIP，避免远程桌面逐个复制大量小文件。
+
 3366 产品注册表只保留暗区突围国服：
 
 ```json

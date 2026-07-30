@@ -172,6 +172,28 @@ class Socks5Server:
             self._server.close()
         _event("INFO", self.label, "服务已停止")
 
+    async def shutdown(self, timeout: float = 8.0) -> None:
+        """停止接入、关闭现有连接，并等待连接 finally 完成采集落盘。"""
+        if self._server:
+            self._server.close()
+            try:
+                await self._server.wait_closed()
+            except Exception:
+                pass
+        for writer in list(self._conn_client_writers.values()):
+            try:
+                writer.close()
+            except Exception:
+                pass
+        deadline = time.monotonic() + timeout
+        while self._active_conns > 0 and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        _event(
+            "INFO",
+            self.label,
+            f"服务已停止，剩余连接={self._active_conns}",
+        )
+
     async def handle_client(self, reader, writer):
         addr      = writer.get_extra_info("peername")
         client_ip = addr[0]
@@ -2162,12 +2184,52 @@ class ProxyEngine:
         finally:
             self.running = False
 
+    async def _graceful_shutdown(self) -> str | None:
+        """先排空连接，再结束采集并生成自检/校验和/ZIP。"""
+        servers = [srv for srv in (self.server_1080, self.server_1081) if srv]
+        if servers:
+            await asyncio.gather(
+                *(srv.shutdown() for srv in servers),
+                return_exceptions=True,
+            )
+        return special_capture_manager.stop()
+
     def stop(self):
-        capture_dir = special_capture_manager.stop()
+        capture_dir = None
+        if (
+            self.loop
+            and self.loop.is_running()
+            and threading.current_thread() is not self._thread
+        ):
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._graceful_shutdown(), self.loop
+                )
+                capture_dir = future.result(timeout=20)
+            except Exception as ex:
+                _event("ERROR", "Engine", f"等待采集写盘结束异常：{ex}")
+                capture_dir = special_capture_manager.stop()
+        else:
+            if self.server_1080:
+                self.server_1080.stop()
+            if self.server_1081:
+                self.server_1081.stop()
+            capture_dir = special_capture_manager.stop()
         if capture_dir:
-            _event("INFO", "Engine", f"专项采集已完成：{capture_dir}")
-        if self.server_1080: self.server_1080.stop()
-        if self.server_1081: self.server_1081.stop()
+            capture_status = special_capture_manager.last_status
+            archive = special_capture_manager.last_archive_path
+            if capture_status == "valid":
+                _event(
+                    "INFO",
+                    "Engine",
+                    f"专项采集自检通过：{capture_dir}；传输文件={archive}",
+                )
+            else:
+                _event(
+                    "ERROR",
+                    "Engine",
+                    f"专项采集自检失败，原目录已保留：{capture_dir}",
+                )
         if self.admin_api:
             try:
                 self.admin_api.stop()

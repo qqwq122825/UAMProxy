@@ -12,6 +12,7 @@ import os
 import shutil
 import threading
 import time
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -43,24 +44,91 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _now_pair() -> tuple[int, int]:
     return time.time_ns(), time.monotonic_ns()
 
 
 def _json_dump(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    os.replace(tmp, path)
+    payload = json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
+    _write_bytes_verified(path, payload)
 
 
 def _append_jsonl(path: Path, value: dict) -> None:
+    payload = (
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    _append_bytes_verified(path, payload)
+
+
+def _write_all(f, payload: bytes) -> None:
+    view = memoryview(payload)
+    written = 0
+    while written < len(view):
+        n = f.write(view[written:])
+        if not n:
+            raise OSError(f"short write: {written}/{len(view)}")
+        written += n
+
+
+def _write_bytes_verified(path: Path, payload: bytes) -> None:
+    """临时文件完整写入、fsync、读回校验后原子替换。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+    temp = path.with_name(
+        f".{path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
+    )
+    try:
+        with temp.open("wb") as f:
+            _write_all(f, payload)
+            f.flush()
+            os.fsync(f.fileno())
+        if temp.stat().st_size != len(payload):
+            raise OSError(
+                f"length mismatch for {path}: {temp.stat().st_size}!={len(payload)}"
+            )
+        readback = temp.read_bytes()
+        if _sha256(readback) != _sha256(payload):
+            raise OSError(f"readback hash mismatch for {path}")
+        os.replace(temp, path)
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _append_bytes_verified(
+    path: Path, payload: bytes, expected_offset: int | None = None
+) -> int:
+    """串行追加并立即读回刚写入的范围，返回写入前偏移。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as f:
+        f.seek(0, os.SEEK_END)
+        offset = f.tell()
+        if expected_offset is not None and offset != expected_offset:
+            raise OSError(
+                f"stream offset mismatch for {path}: {offset}!={expected_offset}"
+            )
+        _write_all(f, payload)
+        f.flush()
+        os.fsync(f.fileno())
+        if f.tell() != offset + len(payload):
+            raise OSError(f"append length mismatch for {path}")
+        f.seek(offset)
+        readback = f.read(len(payload))
+    if _sha256(readback) != _sha256(payload):
+        raise OSError(f"append readback hash mismatch for {path} at {offset}")
+    return offset
 
 
 @dataclass
@@ -113,6 +181,9 @@ class SpecialCaptureManager:
         self._start_mono_ns = 0
         self._next_connection = 0
         self._connections: dict[str, _Connection] = {}
+        self._writer_errors: list[str] = []
+        self._last_archive: str | None = None
+        self._last_status: str | None = None
         self._totals = {
             "connections": 0,
             "chunks": 0,
@@ -129,6 +200,16 @@ class SpecialCaptureManager:
         with self._lock:
             return str(self._root) if self._root else None
 
+    @property
+    def last_archive_path(self) -> str | None:
+        with self._lock:
+            return self._last_archive
+
+    @property
+    def last_status(self) -> str | None:
+        with self._lock:
+            return self._last_status
+
     def start(self, target_user: str, base_dir: str | None = None) -> str:
         with self._lock:
             if self._root:
@@ -141,6 +222,9 @@ class SpecialCaptureManager:
             self._start_mono_ns = mono_ns
             self._next_connection = 0
             self._connections.clear()
+            self._writer_errors.clear()
+            self._last_archive = None
+            self._last_status = "recording"
             for key in self._totals:
                 self._totals[key] = 0
 
@@ -157,6 +241,7 @@ class SpecialCaptureManager:
                 {
                     "schemaVersion": 1,
                     "sessionId": self._session_id,
+                    "sessionStatus": "recording",
                     "captureStartUnixNs": unix_ns,
                     "captureStartMonotonicNs": mono_ns,
                     "captureEndUnixNs": None,
@@ -196,11 +281,14 @@ class SpecialCaptureManager:
                 },
             )
             self._append_timeline_locked("phase", "capture_start", "专项采集启动")
-            (self._root / "dns.jsonl").touch()
-            (self._root / "anomalies.jsonl").touch()
-            (self._root / "capture.log").write_text(
-                f"{datetime.now().isoformat()} capture started accountAlias=ACCOUNT_A\n",
-                encoding="utf-8",
+            _write_bytes_verified(self._root / "dns.jsonl", b"")
+            _write_bytes_verified(self._root / "anomalies.jsonl", b"")
+            _write_bytes_verified(
+                self._root / "capture.log",
+                (
+                    f"{datetime.now().isoformat()} "
+                    "capture started accountAlias=ACCOUNT_A\n"
+                ).encode("utf-8"),
             )
             return str(self._root)
 
@@ -252,7 +340,7 @@ class SpecialCaptureManager:
                 "c2s.raw.bin",
                 "s2c.raw.bin",
             ):
-                (base / name).touch()
+                _write_bytes_verified(base / name, b"")
             unix_ns, mono_ns = _now_pair()
             state = _Connection(
                 proxy_id=proxy_conn_id,
@@ -279,6 +367,17 @@ class SpecialCaptureManager:
             return bool(state and not state.closed)
 
     def record_chunk(self, proxy_conn_id: str, direction: str, data: bytes) -> None:
+        """故障隔离入口：写盘异常记入会话，但不改变代理转发。"""
+        try:
+            self._record_chunk_impl(proxy_conn_id, direction, data)
+        except Exception as ex:
+            self._record_writer_error(
+                f"RAW_TAP {proxy_conn_id} {direction}: {type(ex).__name__}: {ex}"
+            )
+
+    def _record_chunk_impl(
+        self, proxy_conn_id: str, direction: str, data: bytes
+    ) -> None:
         """RAW_TAP：保存每次非空 socket read，随后把副本交给独立解析器。"""
         if not data:
             return
@@ -296,9 +395,12 @@ class SpecialCaptureManager:
             rel_file = (
                 f"chunks/chunk-{chunk_id:06d}.{canonical_dir}.bin"
             )
-            (state.base_dir / rel_file).write_bytes(payload)
-            with (state.base_dir / f"{canonical_dir}.raw.bin").open("ab") as f:
-                f.write(payload)
+            _write_bytes_verified(state.base_dir / rel_file, payload)
+            _append_bytes_verified(
+                state.base_dir / f"{canonical_dir}.raw.bin",
+                payload,
+                expected_offset=offset,
+            )
             row = {
                 "schemaVersion": 1,
                 "chunkId": chunk_id,
@@ -343,6 +445,31 @@ class SpecialCaptureManager:
                 trim = len(state.parse_buf[canonical_dir]) - MAX_UNCLASSIFIED_PARSE_BYTES
                 del state.parse_buf[canonical_dir][:trim]
                 state.parse_base[canonical_dir] += trim
+
+    def _record_writer_error(self, message: str) -> None:
+        with self._lock:
+            self._writer_errors.append(message)
+            if not self._root:
+                return
+            try:
+                _append_bytes_verified(
+                    self._root / "capture.log",
+                    (
+                        f"{datetime.now().isoformat()} WRITER_ERROR {message}\n"
+                    ).encode("utf-8"),
+                )
+                _append_jsonl(
+                    self._root / "anomalies.jsonl",
+                    {
+                        "schemaVersion": 1,
+                        "type": "WRITER_ERROR",
+                        "message": message,
+                        "timestampUnixNs": time.time_ns(),
+                        "timestampMonotonicNs": time.monotonic_ns(),
+                    },
+                )
+            except Exception:
+                pass
 
     def _try_classify_locked(self, state: _Connection) -> None:
         candidates: list[tuple[int, str, str]] = []
@@ -479,7 +606,7 @@ class SpecialCaptureManager:
             f"{state.connection_id[-4:]}-F{frame_index:06d}"
         )
         rel_raw = f"frames/frame-{frame_index:06d}.raw.bin"
-        (state.base_dir / rel_raw).write_bytes(frame)
+        _write_bytes_verified(state.base_dir / rel_raw, bytes(frame))
         source_ids, first_unix, first_mono = self._source_chunks(
             state, direction, offset, len(frame)
         )
@@ -575,7 +702,7 @@ class SpecialCaptureManager:
         state.logical_count += 1
         idx = state.logical_count
         rel = f"logical-messages/message-{idx:06d}.bin"
-        (state.base_dir / rel).write_bytes(logical)
+        _write_bytes_verified(state.base_dir / rel, bytes(logical))
         _append_jsonl(
             state.base_dir / "logical-messages.jsonl",
             {
@@ -660,7 +787,7 @@ class SpecialCaptureManager:
         ciphertext = frame[25:25 + enc_len]
         frame_index = row["frameIndex"]
         rel_cipher = f"frames/frame-{frame_index:06d}.ciphertext.bin"
-        (state.base_dir / rel_cipher).write_bytes(ciphertext)
+        _write_bytes_verified(state.base_dir / rel_cipher, bytes(ciphertext))
         row.update(
             {
                 "ciphertextOffset": 25,
@@ -676,7 +803,7 @@ class SpecialCaptureManager:
             row["decryptStatus"] = "failed"
             return
         rel_plain = f"frames/frame-{frame_index:06d}.plaintext.bin"
-        (state.base_dir / rel_plain).write_bytes(plaintext)
+        _write_bytes_verified(state.base_dir / rel_plain, bytes(plaintext))
         row.update(
             {
                 "decryptStatus": "success",
@@ -744,6 +871,16 @@ class SpecialCaptureManager:
         )
 
     def close_connection(self, proxy_conn_id: str, reason: str = "fin") -> None:
+        try:
+            self._close_connection_impl(proxy_conn_id, reason)
+        except Exception as ex:
+            self._record_writer_error(
+                f"CLOSE {proxy_conn_id}: {type(ex).__name__}: {ex}"
+            )
+
+    def _close_connection_impl(
+        self, proxy_conn_id: str, reason: str = "fin"
+    ) -> None:
         with self._lock:
             state = self._connections.get(proxy_conn_id)
             if not state or state.closed:
@@ -778,6 +915,32 @@ class SpecialCaptureManager:
                 close_mono_ns=mono_ns,
             )
             self._log_locked(f"close {state.connection_id} reason={reason}")
+            self._write_checkpoint_locked()
+
+    def _write_checkpoint_locked(self) -> None:
+        """连接关闭即落一份未结束快照，避免目录被提前复制时没有任何状态说明。"""
+        if not self._root:
+            return
+        unix_ns, mono_ns = _now_pair()
+        session_path = self._root / "session.json"
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        session["sessionStatus"] = "recording"
+        session["lastCheckpointUnixNs"] = unix_ns
+        session["lastCheckpointMonotonicNs"] = mono_ns
+        session["checkpointTotals"] = dict(self._totals)
+        _json_dump(session_path, session)
+        _json_dump(
+            self._root / "checkpoint-integrity.json",
+            {
+                "schemaVersion": 1,
+                "generatedUnixNs": unix_ns,
+                "sessionStatus": "recording",
+                "finalized": False,
+                "writerErrors": list(self._writer_errors),
+                "note": "请点击停止代理，等待最终完整性报告、checksums和ZIP生成。",
+            },
+        )
+        self._write_checksum_file_locked("checkpoint-checksums.sha256")
 
     def _write_connection_anomalies_locked(self, state: _Connection) -> None:
         if not self._root:
@@ -826,7 +989,7 @@ class SpecialCaptureManager:
             state.logical_count += 1
             idx = state.logical_count
             rel = f"logical-messages/message-{idx:06d}.bin"
-            (state.base_dir / rel).write_bytes(logical)
+            _write_bytes_verified(state.base_dir / rel, bytes(logical))
             _append_jsonl(
                 state.base_dir / "logical-messages.jsonl",
                 {
@@ -888,6 +1051,7 @@ class SpecialCaptureManager:
             session["captureEndUnixNs"] = end_unix
             session["captureEndMonotonicNs"] = end_mono
             session["totals"] = dict(self._totals)
+            session["sessionStatus"] = "finalizing"
             _json_dump(session_path, session)
 
             self._log_locked(
@@ -895,12 +1059,56 @@ class SpecialCaptureManager:
                 + " ".join(f"{k}={v}" for k, v in self._totals.items())
             )
             report = self._build_integrity_report_locked()
+            if self._append_integrity_anomalies_locked(report):
+                report = self._build_integrity_report_locked()
+            session_status = "invalid" if report["status"] == "failed" else "valid"
+            self._last_status = session_status
+            session["sessionStatus"] = session_status
+            _json_dump(session_path, session)
+            report["sessionStatus"] = session_status
             _json_dump(self._root / "integrity-report.json", report)
             self._write_checksums_locked()
             result = str(self._root)
+            self._last_archive = self._create_archive_locked()
             self._root = None
             self._connections.clear()
             return result
+
+    def _append_integrity_anomalies_locked(self, report: dict) -> bool:
+        assert self._root is not None
+        checks = (
+            ("invalidJsonl", "JSON_PARSE_FAILED"),
+            ("textNulFiles", "JSONL_HAS_NUL"),
+            ("sparseOutputFiles", "SPARSE_OUTPUT_FILE"),
+            ("chunkHashErrors", "READBACK_HASH_MISMATCH"),
+            ("frameHashErrors", "READBACK_HASH_MISMATCH"),
+            ("streamContentMismatches", "READBACK_HASH_MISMATCH"),
+            ("frameStreamMismatches", "READBACK_HASH_MISMATCH"),
+            ("chunkCountMismatches", "CHUNK_COUNT_MISMATCH"),
+            ("frameCountMismatches", "FRAME_COUNT_MISMATCH"),
+        )
+        grouped: dict[str, list[str]] = {}
+        for field_name, anomaly_type in checks:
+            values = report.get(field_name) or []
+            if values:
+                grouped.setdefault(anomaly_type, []).extend(map(str, values))
+        for error in report.get("writerErrors") or []:
+            grouped.setdefault("WRITER_ERROR", []).append(str(error))
+        if not grouped:
+            return False
+        for anomaly_type, details in grouped.items():
+            _append_jsonl(
+                self._root / "anomalies.jsonl",
+                {
+                    "schemaVersion": 1,
+                    "type": anomaly_type,
+                    "count": len(details),
+                    "examples": details[:20],
+                    "timestampUnixNs": time.time_ns(),
+                    "timestampMonotonicNs": time.monotonic_ns(),
+                },
+            )
+        return True
 
     def _build_integrity_report_locked(self) -> dict:
         assert self._root is not None
@@ -909,6 +1117,24 @@ class SpecialCaptureManager:
         stream_range_errors: list[str] = []
         chunk_hash_errors: list[str] = []
         forward_hash_mismatches: list[str] = []
+        stream_content_mismatches: list[str] = []
+        frame_hash_errors: list[str] = []
+        frame_stream_mismatches: list[str] = []
+        text_nul_files: list[str] = []
+        sparse_output_files: list[str] = []
+        chunk_count_mismatches: list[str] = []
+        frame_count_mismatches: list[str] = []
+        invalid_jsonl_paths: set[str] = set()
+        for path in self._root.rglob("*"):
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            blocks = getattr(stat, "st_blocks", None)
+            if stat.st_size > 0 and blocks == 0:
+                sparse_output_files.append(str(path.relative_to(self._root)))
+            if path.suffix in (".json", ".jsonl", ".log", ".sha256"):
+                if b"\x00" in path.read_bytes():
+                    text_nul_files.append(str(path.relative_to(self._root)))
         for path in self._root.rglob("*.jsonl"):
             line_no = 0
             try:
@@ -918,11 +1144,23 @@ class SpecialCaptureManager:
                     if line.strip():
                         json.loads(line)
             except Exception as ex:
-                invalid_jsonl.append(f"{path.relative_to(self._root)}:{line_no}:{ex}")
+                rel = str(path.relative_to(self._root))
+                invalid_jsonl_paths.add(rel)
+                invalid_jsonl.append(f"{rel}:{line_no}:{ex}")
         for path in self._root.rglob("frames.jsonl"):
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
+            if str(path.relative_to(self._root)) in invalid_jsonl_paths:
+                continue
+            frame_rows = [
+                line for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            raw_frame_files = list((path.parent / "frames").glob("frame-*.raw.bin"))
+            if len(frame_rows) != len(raw_frame_files):
+                frame_count_mismatches.append(
+                    f"{path.parent.relative_to(self._root)}:"
+                    f"rows={len(frame_rows)} files={len(raw_frame_files)}"
+                )
+            for line in frame_rows:
                 row = json.loads(line)
                 for field_name in ("rawFile", "ciphertextFile", "plaintextFile"):
                     rel = row.get(field_name)
@@ -930,11 +1168,47 @@ class SpecialCaptureManager:
                         missing.append(
                             f"{path.parent.relative_to(self._root)}/{rel}"
                         )
+                raw_rel = row.get("rawFile")
+                raw_path = path.parent / str(raw_rel or "")
+                if raw_rel and raw_path.is_file():
+                    raw_bytes = raw_path.read_bytes()
+                    if (
+                        len(raw_bytes) != row.get("frameLength")
+                        or _sha256(raw_bytes) != row.get("rawSha256")
+                    ):
+                        frame_hash_errors.append(
+                            str(raw_path.relative_to(self._root))
+                        )
+                    direction = row.get("direction")
+                    stream_path = path.parent / f"{direction}.raw.bin"
+                    offset = int(row.get("streamOffset", 0))
+                    if stream_path.is_file():
+                        with stream_path.open("rb") as stream:
+                            stream.seek(offset)
+                            stream_slice = stream.read(len(raw_bytes))
+                        if stream_slice != raw_bytes:
+                            frame_stream_mismatches.append(
+                                str(raw_path.relative_to(self._root))
+                            )
         for path in self._root.rglob("chunks.jsonl"):
+            if str(path.relative_to(self._root)) in invalid_jsonl_paths:
+                continue
             conn_dir = path.parent
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
+            chunk_rows = [
+                line for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            chunk_files = list((conn_dir / "chunks").glob("chunk-*.bin"))
+            if len(chunk_rows) != len(chunk_files):
+                chunk_count_mismatches.append(
+                    f"{conn_dir.relative_to(self._root)}:"
+                    f"rows={len(chunk_rows)} files={len(chunk_files)}"
+                )
+            rows_by_direction: dict[str, list[tuple[int, bytes]]] = {
+                "c2s": [],
+                "s2c": [],
+            }
+            for line in chunk_rows:
                 row = json.loads(line)
                 direction = row.get("direction")
                 raw_stream = conn_dir / f"{direction}.raw.bin"
@@ -949,8 +1223,14 @@ class SpecialCaptureManager:
                 raw_file = conn_dir / str(row.get("rawFile", ""))
                 if not raw_file.is_file():
                     missing.append(str(raw_file.relative_to(self._root)))
-                elif _sha256(raw_file.read_bytes()) != row.get("payloadSha256"):
-                    chunk_hash_errors.append(str(raw_file.relative_to(self._root)))
+                else:
+                    chunk_bytes = raw_file.read_bytes()
+                    if _sha256(chunk_bytes) != row.get("payloadSha256"):
+                        chunk_hash_errors.append(str(raw_file.relative_to(self._root)))
+                    if direction in rows_by_direction:
+                        rows_by_direction[direction].append(
+                            (int(row.get("streamOffset", 0)), chunk_bytes)
+                        )
                 if (
                     row.get("modified") is not False
                     or row.get("payloadLength") != row.get("forwardedLength")
@@ -960,30 +1240,85 @@ class SpecialCaptureManager:
                         f"{conn_dir.relative_to(self._root)}:"
                         f"chunk={row.get('chunkId')}"
                     )
-        session = json.loads((self._root / "session.json").read_text(encoding="utf-8"))
+            for direction, pieces in rows_by_direction.items():
+                pieces.sort(key=lambda item: item[0])
+                stream_path = conn_dir / f"{direction}.raw.bin"
+                if stream_path.is_file():
+                    digest = hashlib.sha256()
+                    expected_offset = 0
+                    for offset, piece in pieces:
+                        if offset != expected_offset:
+                            stream_content_mismatches.append(
+                                str(stream_path.relative_to(self._root))
+                            )
+                            break
+                        digest.update(piece)
+                        expected_offset += len(piece)
+                    else:
+                        if (
+                            expected_offset != stream_path.stat().st_size
+                            or digest.hexdigest() != _sha256_file(stream_path)
+                        ):
+                            stream_content_mismatches.append(
+                                str(stream_path.relative_to(self._root))
+                            )
+        try:
+            session = json.loads(
+                (self._root / "session.json").read_text(encoding="utf-8")
+            )
+        except Exception as ex:
+            session = {}
+            invalid_jsonl.append(f"session.json:0:{ex}")
         capture_directions_valid = session.get("captureDirections") == ["c2s", "s2c"]
-        connection_rows = [
-            json.loads(path.read_text(encoding="utf-8"))
-            for path in self._root.rglob("connection.json")
-        ]
+        connection_rows = []
+        for path in self._root.rglob("connection.json"):
+            try:
+                connection_rows.append(
+                    json.loads(path.read_text(encoding="utf-8"))
+                )
+            except Exception as ex:
+                invalid_jsonl.append(
+                    f"{path.relative_to(self._root)}:0:{ex}"
+                )
         both_direction_count = sum(
             1 for row in connection_rows
             if row.get("c2sBytes", 0) > 0 and row.get("s2cBytes", 0) > 0
         )
-        anomalies = [
-            json.loads(line)
-            for line in (self._root / "anomalies.jsonl").read_text(
-                encoding="utf-8"
-            ).splitlines()
-            if line.strip()
-        ]
+        anomalies = []
+        try:
+            anomalies = [
+                json.loads(line)
+                for line in (self._root / "anomalies.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+                if line.strip()
+            ]
+        except Exception as ex:
+            invalid_jsonl.append(f"anomalies.jsonl:0:{ex}")
+        critical_anomaly_types = {
+            "ONE_DIRECTION_MISSING",
+            "MISSING_COMPLETE_DOWNLINK_1002",
+            "WRITER_ERROR",
+        }
+        has_critical_anomaly = any(
+            row.get("type") in critical_anomaly_types for row in anomalies
+        )
         hard_failures = (
             invalid_jsonl
             or missing
             or stream_range_errors
             or chunk_hash_errors
             or forward_hash_mismatches
+            or stream_content_mismatches
+            or frame_hash_errors
+            or frame_stream_mismatches
+            or text_nul_files
+            or sparse_output_files
+            or chunk_count_mismatches
+            or frame_count_mismatches
             or not capture_directions_valid
+            or self._writer_errors
+            or has_critical_anomaly
         )
         return {
             "schemaVersion": 1,
@@ -998,11 +1333,20 @@ class SpecialCaptureManager:
             "connectionCount": len(connection_rows),
             "anomalyCount": len(anomalies),
             "anomalyTypes": sorted({row.get("type") for row in anomalies}),
+            "criticalAnomaly": has_critical_anomaly,
             "invalidJsonl": invalid_jsonl,
             "missingReferencedFiles": missing,
             "streamRangeErrors": stream_range_errors,
             "chunkHashErrors": chunk_hash_errors,
             "forwardHashMismatches": forward_hash_mismatches,
+            "streamContentMismatches": stream_content_mismatches,
+            "frameHashErrors": frame_hash_errors,
+            "frameStreamMismatches": frame_stream_mismatches,
+            "textNulFiles": text_nul_files,
+            "sparseOutputFiles": sparse_output_files,
+            "chunkCountMismatches": chunk_count_mismatches,
+            "frameCountMismatches": frame_count_mismatches,
+            "writerErrors": list(self._writer_errors),
             "pcapngAvailable": False,
             "dnsCaptured": False,
             "status": "failed" if hard_failures else (
@@ -1011,21 +1355,66 @@ class SpecialCaptureManager:
         }
 
     def _write_checksums_locked(self) -> None:
+        self._write_checksum_file_locked("checksums.sha256")
+
+    def _write_checksum_file_locked(self, filename: str) -> None:
         assert self._root is not None
-        output = self._root / "checksums.sha256"
+        output = self._root / filename
         rows = []
         for path in sorted(self._root.rglob("*")):
-            if not path.is_file() or path == output:
+            if (
+                not path.is_file()
+                or path == output
+                or path.name in {"checksums.sha256", "checkpoint-checksums.sha256"}
+            ):
                 continue
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             rows.append(f"{digest}  {path.relative_to(self._root).as_posix()}")
-        output.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        _write_bytes_verified(
+            output, ("\n".join(rows) + "\n").encode("utf-8")
+        )
+
+    def _create_archive_locked(self) -> str:
+        """停止后生成单一 ZIP，避免远程桌面逐文件复制破坏大量小文件。"""
+        assert self._root is not None
+        archive = self._root.with_suffix(".zip")
+        temp = archive.with_suffix(".zip.tmp")
+        try:
+            with zipfile.ZipFile(
+                temp, "w", compression=zipfile.ZIP_STORED, allowZip64=True
+            ) as zf:
+                for path in sorted(self._root.rglob("*")):
+                    if path.is_file():
+                        zf.write(
+                            path,
+                            arcname=(
+                                f"{self._root.name}/"
+                                f"{path.relative_to(self._root).as_posix()}"
+                            ),
+                        )
+            with temp.open("r+b") as f:
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp, archive)
+            digest = _sha256_file(archive)
+            _write_bytes_verified(
+                archive.with_suffix(".zip.sha256"),
+                f"{digest}  {archive.name}\n".encode("ascii"),
+            )
+            return str(archive)
+        finally:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _log_locked(self, message: str) -> None:
         if not self._root:
             return
-        with (self._root / "capture.log").open("a", encoding="utf-8") as f:
-            f.write(f"{datetime.now().isoformat()} {message}\n")
+        _append_bytes_verified(
+            self._root / "capture.log",
+            f"{datetime.now().isoformat()} {message}\n".encode("utf-8"),
+        )
 
 
 special_capture_manager = SpecialCaptureManager()

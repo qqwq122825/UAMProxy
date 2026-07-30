@@ -795,7 +795,7 @@ class MainWindow(QMainWindow):
         self.edit_capture_user.setToolTip("仅采集使用此代理账号登录录制端口的双向流量")
         capture_bar.addWidget(self.edit_capture_user)
         self.lbl_capture_hint = QLabel(
-            "输出：capture-clean-时间/（原始 chunk + 字节流 + 完整帧）"
+            "输出：capture-clean-时间/；停止代理后自检并生成 ZIP"
         )
         self.lbl_capture_hint.setStyleSheet("color:#64748b;font-size:11px;")
         capture_bar.addWidget(self.lbl_capture_hint)
