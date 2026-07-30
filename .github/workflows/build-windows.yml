@@ -21,11 +21,11 @@ jobs:
         run: python -m pip install --upgrade pyinstaller PySide6 pycryptodome
 
       - name: Run project packaging script
-        run: python build.py
+        run: python build_slim.py
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
           name: UAMProxy-Windows
-          path: dist/UAMProxy.exe
+          path: dist/UAMProxy_v*.exe
           if-no-files-found: error
