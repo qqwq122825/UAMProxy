@@ -2,6 +2,7 @@ import os
 import json
 import threading
 import time
+import uuid
 
 from core.events import log_bus, _event
 from core.crypto import (
@@ -17,32 +18,57 @@ from core.traffic_session_log import traffic_file_logger
 # ─────────────────────────────────────────
 class RecordingPool:
     """
-    按客户端 IP + 游戏ID 存储录制的 01 00 反作弊数据包。
-    同一 IP 可以有多条录制（不同游戏账号），互不覆盖。
-    1081 录制端口静默写入；1080 重放端口按游戏ID选择匹配的会话进行重放。
+    代理账号是录制的数据归属边界，recording_id 是单次录制主键，
+    游戏ID用于重放精确匹配，IP 只用于当前连接关联和展示。
+    同一代理账号 + IP 的并发 01/3366 连接共享当前录制；不同代理
+    账号即使公网 IP 相同也不共享录制池。
 
     内部结构：
       _sessions: {ip: [session, ...]}
-      session:   {"sid": str, "pkts": [bytes], "active": bool,
-                  "game_id": str, "created_at": float}
-      sid 格式："{ip}#{idx}"（唯一标识一条录制会话）
+      session:   {"recording_id": str, "proxy_username": str,
+                  "source_ips": [str], "connections": [str], ...}
     """
     def __init__(self):
         self._lock = threading.Lock()
         self._sessions: dict[str, list[dict]] = {}   # ip → [session, ...]
-        self._capture_assemblers: dict[str, AceCaptureAssembler] = {}
+        self._capture_assemblers: dict[tuple[str, str], AceCaptureAssembler] = {}
 
     # ── 内部工具 ─────────────────────────────
-    def _active_session(self, client_ip: str) -> dict | None:
-        """返回该 IP 当前活跃的录制会话（最后一条 active=True），否则 None"""
+    @staticmethod
+    def _owner(proxy_username: str | None) -> str:
+        return (proxy_username or "").strip() or "default"
+
+    @staticmethod
+    def _new_recording_id() -> str:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        return f"REC-{stamp}-{uuid.uuid4().hex[:6].upper()}"
+
+    @staticmethod
+    def _session_owner(session: dict) -> str:
+        return str(session.get("proxy_username") or "legacy-shared")
+
+    @classmethod
+    def _owner_visible(cls, session: dict, proxy_username: str | None) -> bool:
+        """旧版导入数据标记为 legacy-shared，保留向后兼容；新录制严格按代理账号隔离。"""
+        if proxy_username is None:
+            return True
+        owner = cls._session_owner(session)
+        return owner in {cls._owner(proxy_username), "legacy-shared"}
+
+    def _active_session(
+        self, client_ip: str, proxy_username: str | None = None
+    ) -> dict | None:
+        """返回该代理账号 + IP 当前活跃的录制会话。"""
         for s in reversed(self._sessions.get(client_ip, [])):
-            if s.get("active"):
+            if s.get("active") and self._owner_visible(s, proxy_username):
                 return s
         return None
 
-    def _stop_active(self, client_ip: str) -> tuple[int, str]:
+    def _stop_active(
+        self, client_ip: str, proxy_username: str | None = None
+    ) -> tuple[int, str]:
         """停止该 IP 的活跃会话，返回 (包数, 游戏ID)"""
-        s = self._active_session(client_ip)
+        s = self._active_session(client_ip, proxy_username)
         if s:
             s["active"] = False
             return len(s["pkts"]), s.get("game_id", "")
@@ -56,6 +82,7 @@ class RecordingPool:
                 session for session in sessions
                 if session is not current
                 and not session.get("active")
+                and self._session_owner(session) == self._session_owner(current)
                 and str(session.get("game_id") or "") == str(game_id)
             ]
             if stale:
@@ -92,7 +119,12 @@ class RecordingPool:
         return s["pool_items"]
 
     # ── 录制侧 API ───────────────────────────
-    def new_session(self, client_ip: str) -> bool:
+    def new_session(
+        self,
+        client_ip: str,
+        proxy_username: str | None = None,
+        conn_id: str = "",
+    ) -> bool:
         """
         1081 新连接时调用。
         · 已有活跃会话 → 共享（引用计数 +1），返回 False。
@@ -101,21 +133,47 @@ class RecordingPool:
         """
         cleared_count = 0
         with self._lock:
-            active = self._active_session(client_ip)
+            owner = self._owner(proxy_username)
+            active = self._active_session(client_ip, owner)
             if active:
                 active["_refs"] = active.get("_refs", 1) + 1
+                if conn_id:
+                    conns = active.setdefault("connections", [])
+                    if conn_id not in conns:
+                        conns.append(conn_id)
+                    history = active.setdefault("connection_history", [])
+                    if conn_id not in history:
+                        history.append(conn_id)
                 return False
             # 一个新的录制生命周期必须从空池开始。旧实现保留同 IP 历史会话，
             # 后续 find_pool_by_game_id 会把新旧模板合并，表现为“不明原因追加录制”。
-            old_sessions = self._sessions.pop(client_ip, [])
-            self._capture_assemblers[client_ip] = AceCaptureAssembler()
+            all_sessions = self._sessions.get(client_ip, [])
+            old_sessions = [
+                s for s in all_sessions if self._session_owner(s) == owner
+            ]
+            kept_sessions = [
+                s for s in all_sessions if self._session_owner(s) != owner
+            ]
+            if kept_sessions:
+                self._sessions[client_ip] = kept_sessions
+            else:
+                self._sessions.pop(client_ip, None)
+            assembler_key = (owner, client_ip)
+            self._capture_assemblers[assembler_key] = AceCaptureAssembler()
             cleared_count = sum(
                 session.get("_pool_count") or len(self._session_pool(session))
                 for session in old_sessions
             )
             sessions = self._sessions.setdefault(client_ip, [])
-            sid = f"{client_ip}#{int(time.time())}"
-            sessions.append({"sid": sid, "pkts": [], "active": True,
+            recording_id = self._new_recording_id()
+            sessions.append({"sid": recording_id,
+                              "recording_id": recording_id,
+                              "proxy_username": owner,
+                              "source_ips": [client_ip],
+                              "connections": [conn_id] if conn_id else [],
+                              "connection_history": [conn_id] if conn_id else [],
+                              "connection_details": {},
+                              "pkts": [], "active": True,
                               "game_id": "", "created_at": time.time(),
                               "last_record_at": 0.0,
                               "pool_items": [], "_pool_count": 0,
@@ -136,12 +194,49 @@ class RecordingPool:
             log_bus.record_updated.emit()
         return True
 
-    def set_session_3366_key_ready(self, client_ip: str) -> None:
+    def update_connection_target(
+        self,
+        client_ip: str,
+        proxy_username: str | None,
+        conn_id: str,
+        remote_endpoint: str,
+    ) -> None:
+        """补全录制下属连接的目标地址，供代理账号分组树展开显示。"""
+        with self._lock:
+            session = self._active_session(client_ip, proxy_username)
+            if not session:
+                return
+            history = session.setdefault("connection_history", [])
+            if conn_id not in history:
+                history.append(conn_id)
+            details = session.setdefault("connection_details", {})
+            details.setdefault(conn_id, {})["remote_endpoint"] = remote_endpoint
+
+    def mark_connection_protocol(
+        self,
+        client_ip: str,
+        proxy_username: str | None,
+        conn_id: str,
+        protocol: str,
+    ) -> None:
+        with self._lock:
+            session = self._active_session(client_ip, proxy_username)
+            if not session:
+                return
+            details = session.setdefault("connection_details", {})
+            item = details.setdefault(conn_id, {})
+            protocols = item.setdefault("protocols", [])
+            if protocol and protocol not in protocols:
+                protocols.append(protocol)
+
+    def set_session_3366_key_ready(
+        self, client_ip: str, proxy_username: str | None = None
+    ) -> None:
         """
         暗区突围等：首下行 10 02 取到 Key 时调用，会话加入录制管理（不要求已有 01 0A 00 xx）。
         """
         with self._lock:
-            s = self._active_session(client_ip)
+            s = self._active_session(client_ip, proxy_username)
             if not s:
                 return
             if not s.get("has_3366_key"):
@@ -152,14 +247,19 @@ class RecordingPool:
                     s["game_id_source"] = "3366_key"
         log_bus.record_updated.emit()
 
-    def note_join_packet(self, client_ip: str, conn_id: str) -> bool:
+    def note_join_packet(
+        self,
+        client_ip: str,
+        conn_id: str,
+        proxy_username: str | None = None,
+    ) -> bool:
         """
         记录 42B 加入包。若活跃会话已经有模板，而新的 01 连接再次出现加入包，
         视为新一轮录制并原地清空旧池；保留引用计数，兼容上一轮残留 TCP 稍后断开。
         """
         cleared = 0
         with self._lock:
-            s = self._active_session(client_ip)
+            s = self._active_session(client_ip, proxy_username)
             if not s:
                 return False
             previous_conn = s.get("_join_conn_id") or ""
@@ -175,8 +275,10 @@ class RecordingPool:
             cleared = len(pool)
             refs = max(1, int(s.get("_refs", 1) or 1))
             generation = int(s.get("_generation", 1) or 1) + 1
+            recording_id = self._new_recording_id()
             s.update({
-                "sid": f"{client_ip}#{int(time.time())}-{generation}",
+                "sid": recording_id,
+                "recording_id": recording_id,
                 "pkts": [],
                 "game_id": "",
                 "created_at": time.time(),
@@ -198,7 +300,9 @@ class RecordingPool:
                 "ace_user_3366": "",
                 "has_3366_key": False,
             })
-            self._capture_assemblers[client_ip] = AceCaptureAssembler()
+            self._capture_assemblers[
+                (self._session_owner(s), client_ip)
+            ] = AceCaptureAssembler()
         _event(
             "RECORD", "录制",
             f"[{client_ip}] 检测到新的 42B 加入包，已清空上一轮录制池（{cleared} 条模板）",
@@ -207,7 +311,11 @@ class RecordingPool:
         return True
 
     def set_session_3366_product(
-        self, client_ip: str, product_hex: str, product_name: str = ""
+        self,
+        client_ip: str,
+        product_hex: str,
+        product_name: str = "",
+        proxy_username: str | None = None,
     ) -> None:
         """
         由 server 在 3366 帧中识别到产品 ID 时写入当前活跃会话，并刷新录制管理 UI。
@@ -225,7 +333,7 @@ class RecordingPool:
             pass
         changed = False
         with self._lock:
-            s = self._active_session(client_ip)
+            s = self._active_session(client_ip, proxy_username)
             if not s:
                 return
             if s.get("product_hex_3366") != product_hex:
@@ -237,10 +345,12 @@ class RecordingPool:
         if changed:
             log_bus.record_updated.emit()
 
-    def get_active_session_ace_ids(self, client_ip: str) -> tuple[str, str]:
+    def get_active_session_ace_ids(
+        self, client_ip: str, proxy_username: str | None = None
+    ) -> tuple[str, str]:
         """当前活跃录制会话中，01 通道与 3366 通道分别解析到的账号串（可对账）。"""
         with self._lock:
-            s = self._active_session(client_ip)
+            s = self._active_session(client_ip, proxy_username)
             if not s:
                 return "", ""
             return (
@@ -248,25 +358,34 @@ class RecordingPool:
                 (s.get("ace_user_3366") or "").strip(),
             )
 
-    def get_active_01_count(self, client_ip: str) -> int:
+    def get_active_01_count(
+        self, client_ip: str, proxy_username: str | None = None
+    ) -> int:
         """当前活跃录制会话中，来源为 01 的池条目数量（用于自动断线阈值判断）。"""
         with self._lock:
-            s = self._active_session(client_ip)
+            s = self._active_session(client_ip, proxy_username)
             if not s:
                 return 0
             pool = self._session_pool(s)
             return sum(1 for it in pool if str(it.get("source", "") or "") == "01")
 
-    def get_active_33_count(self, client_ip: str) -> int:
+    def get_active_33_count(
+        self, client_ip: str, proxy_username: str | None = None
+    ) -> int:
         """当前活跃录制会话中，来源为 3366（09/21）的池条目数量。"""
         with self._lock:
-            s = self._active_session(client_ip)
+            s = self._active_session(client_ip, proxy_username)
             if not s:
                 return 0
             pool = self._session_pool(s)
             return sum(1 for it in pool if str(it.get("source", "") or "").startswith("3366"))
 
-    def append(self, client_ip: str, data: bytes):
+    def append(
+        self,
+        client_ip: str,
+        data: bytes,
+        proxy_username: str | None = None,
+    ):
         """录制一个 01 00 开头的包，追加到当前活跃会话。
         · 新增加密区时：发出轻量 record_count(sid, count) 信号（每包实时）
         · 会话级 ACE 标识（game_id）：**以 01 通道解析为准**（覆盖 3366 临时值，并回填池中 3366 条目的 account_id）。
@@ -277,11 +396,12 @@ class RecordingPool:
         count_info: tuple | None = None
         replaced_info: tuple | None = None   # (game_id, old_count) 替换时记录
         with self._lock:
-            s = self._active_session(client_ip)
+            s = self._active_session(client_ip, proxy_username)
             if s:
                 new_items = []
+                assembler_key = (self._session_owner(s), client_ip)
                 assembler = self._capture_assemblers.setdefault(
-                    client_ip, AceCaptureAssembler()
+                    assembler_key, AceCaptureAssembler()
                 )
                 for sub in _ace_split_packets(data):
                     item = assembler.feed(sub)
@@ -335,7 +455,12 @@ class RecordingPool:
         elif count_info:
             log_bus.record_count.emit(*count_info)
 
-    def apply_3366_handshake_user_id(self, client_ip: str, uid: str) -> None:
+    def apply_3366_handshake_user_id(
+        self,
+        client_ip: str,
+        uid: str,
+        proxy_username: str | None = None,
+    ) -> None:
         """
         3366 上行 10 01 首包中的用户 ID（TLV）；后续帧通常不再携带。
         **ace_user_3366** 始终更新，便于与 01 侧 ace_user_01 对账。
@@ -349,7 +474,7 @@ class RecordingPool:
         replaced_info: tuple | None = None
         need_conn_refresh = False
         with self._lock:
-            s = self._active_session(client_ip)
+            s = self._active_session(client_ip, proxy_username)
             if not s:
                 return
             prev36 = s.get("ace_user_3366") or ""
@@ -390,8 +515,14 @@ class RecordingPool:
             except Exception:
                 pass
 
-    def append_from_3366_plain(self, client_ip: str, plain: bytes, items: list[dict],
-                                conn_uid: str = ""):
+    def append_from_3366_plain(
+        self,
+        client_ip: str,
+        plain: bytes,
+        items: list[dict],
+        conn_uid: str = "",
+        proxy_username: str | None = None,
+    ):
         """
         将 40 13 解密明文中提取的 01 0A 00 09 / 21 高熵块并入**同一**加密区池（与 01 通道录制共用）。
         会话级 ACE 标识：仅当当前会话尚无 game_id 时，才用明文解析结果暂存；**01 包到达后一律以 01 为准覆盖**。
@@ -406,7 +537,7 @@ class RecordingPool:
         replaced_info: tuple | None = None
         uid_mismatch_warn: str | None = None
         with self._lock:
-            s = self._active_session(client_ip)
+            s = self._active_session(client_ip, proxy_username)
             if not s:
                 return
             sess_gid = (s.get("game_id") or "").strip()
@@ -463,6 +594,7 @@ class RecordingPool:
         frame: bytes,
         *,
         product_label: str | None = None,
+        proxy_username: str | None = None,
     ):
         """
         录制完整 33 66 帧（上下行均可）。用于后续解密分析与重放骨架。
@@ -470,7 +602,7 @@ class RecordingPool:
         """
         emit_full = False
         with self._lock:
-            s = self._active_session(client_ip)
+            s = self._active_session(client_ip, proxy_username)
             if not s:
                 return
             s.setdefault("raw_3366", []).append(
@@ -484,7 +616,13 @@ class RecordingPool:
         if emit_full:
             log_bus.record_updated.emit()
 
-    def stop(self, client_ip: str, force: bool = False) -> tuple[int, str]:
+    def stop(
+        self,
+        client_ip: str,
+        force: bool = False,
+        proxy_username: str | None = None,
+        conn_id: str = "",
+    ) -> tuple[int, str]:
         """
         连接断开时调用，引用计数 -1；只有当引用计数归零或 force=True 时才真正停止。
         返回 (总包数, 游戏ID)；若仍有其他连接在用则返回 (0, "")。
@@ -492,11 +630,18 @@ class RecordingPool:
         """
         discarded_ghost = False
         with self._lock:
-            s = self._active_session(client_ip)
+            s = self._active_session(client_ip, proxy_username)
             if not s:
                 return 0, ""
             if not force:
-                refs = s.get("_refs", 1) - 1
+                connections = s.setdefault("connections", [])
+                if conn_id and conn_id in connections:
+                    connections.remove(conn_id)
+                refs = (
+                    len(connections)
+                    if conn_id
+                    else max(0, int(s.get("_refs", 1) or 1) - 1)
+                )
                 s["_refs"] = refs
                 if refs > 0:
                     return 0, ""   # 还有其他连接在使用本会话
@@ -523,7 +668,9 @@ class RecordingPool:
             log_bus.record_updated.emit()
         return result if not discarded_ghost else (0, "")
 
-    def is_game_id_being_replayed(self, game_id: str) -> bool:
+    def is_game_id_being_replayed(
+        self, game_id: str, proxy_username: str | None = None
+    ) -> bool:
         """
         检查该游戏账号是否有重放端口活跃连接正在使用（_conn_live_gid 中已识别该 uid）。
         录制端口识别到 uid 时调用：若 uid 正在被重放，则阻止追加录制（01 不入池、33 断连）。
@@ -534,32 +681,51 @@ class RecordingPool:
         try:
             from .server import engine
             if engine.server_1080:
-                for gid in engine.server_1080._conn_live_gid.values():
+                allowed_conn_ids: set[str] | None = None
+                if proxy_username is not None:
+                    allowed_conn_ids = set()
+                    owner_map = engine.server_1080._user_active_conns.get(
+                        self._owner(proxy_username), {}
+                    )
+                    for conn_ids in owner_map.values():
+                        allowed_conn_ids.update(conn_ids)
+                for conn_id, gid in engine.server_1080._conn_live_gid.items():
+                    if allowed_conn_ids is not None and conn_id not in allowed_conn_ids:
+                        continue
                     if str(gid) == str(game_id):
                         return True
         except Exception:
             pass
         return False
 
-    def count(self, client_ip: str) -> int:
+    def count(self, client_ip: str, proxy_username: str | None = None) -> int:
         """当前活跃会话的包数（用于 SESSION 日志）"""
         with self._lock:
-            s = self._active_session(client_ip)
+            s = self._active_session(client_ip, proxy_username)
             return len(s["pkts"]) if s else 0
 
-    def game_id(self, client_ip: str) -> str:
+    def game_id(self, client_ip: str, proxy_username: str | None = None) -> str:
         """当前活跃会话的游戏ID"""
         with self._lock:
-            s = self._active_session(client_ip)
+            s = self._active_session(client_ip, proxy_username)
             return s.get("game_id", "") if s else ""
 
     # ── 重放侧 API ───────────────────────────
-    def has_any_data(self, client_ip: str) -> bool:
+    def has_any_data(
+        self, client_ip: str, proxy_username: str | None = None
+    ) -> bool:
         """该 IP 是否有任意非空的、有效（非幽灵）的录制会话（含活跃中）"""
         with self._lock:
-            return any(s.get("pkts") and not s.get("_ghost") for s in self._sessions.get(client_ip, []))
+            return any(
+                self._owner_visible(s, proxy_username)
+                and s.get("pkts")
+                and not s.get("_ghost")
+                for s in self._sessions.get(client_ip, [])
+            )
 
-    def get_all_ip_pools(self, client_ip: str) -> dict[str, dict[str, list[dict]]]:
+    def get_all_ip_pools(
+        self, client_ip: str, proxy_username: str | None = None
+    ) -> dict[str, dict[str, list[dict]]]:
         """
         返回该 IP 所有会话的重放池，按 game_id 索引，每个 game_id 下分 pool_01 / pool_33。
         pool_01：仅 01 来源；pool_33：仅 3366 来源（09/21）。同 game_id 多会话时合并两池。
@@ -568,7 +734,7 @@ class RecordingPool:
         with self._lock:
             result: dict[str, dict[str, list[dict]]] = {}
             for s in self._sessions.get(client_ip, []):
-                if s.get("_ghost"):
+                if s.get("_ghost") or not self._owner_visible(s, proxy_username):
                     continue
                 pool = self._session_pool(s)
                 if not pool:
@@ -607,7 +773,9 @@ class RecordingPool:
                     del result[gid]
         return result
 
-    def find_pool_by_game_id(self, game_id: str) -> dict[str, list[dict]] | None:
+    def find_pool_by_game_id(
+        self, game_id: str, proxy_username: str | None = None
+    ) -> dict[str, list[dict]] | None:
         """
         跨所有录制 IP 查找 game_id 匹配的录制池。
         用于重放用户 IP 与录制用户 IP 不同、但游戏账号相同时的跨 IP 匹配。
@@ -619,7 +787,9 @@ class RecordingPool:
             matched_sessions = []
             for sessions in self._sessions.values():
                 for s in sessions:
-                    if s.get("_ghost"):
+                    if s.get("_ghost") or not self._owner_visible(
+                        s, proxy_username
+                    ):
                         continue
                     if str(s.get("game_id") or "") != str(game_id):
                         continue
@@ -649,26 +819,34 @@ class RecordingPool:
                             result["pool_01"].append(it)
             return result
 
-    def is_game_id_actively_recording(self, game_id: str) -> bool:
+    def is_game_id_actively_recording(
+        self, game_id: str, proxy_username: str | None = None
+    ) -> bool:
         """判断指定游戏账号是否有活跃录制会话（任意IP）。跨IP实时重放判断使用。"""
         if not game_id:
             return False
         with self._lock:
             for sessions in self._sessions.values():
                 for s in sessions:
-                    if s.get("_ghost"):
+                    if s.get("_ghost") or not self._owner_visible(
+                        s, proxy_username
+                    ):
                         continue
                     if str(s.get("game_id") or "") == str(game_id) and s.get("active"):
                         return True
         return False
 
-    def get_all_game_ids(self) -> list[str]:
+    def get_all_game_ids(
+        self, proxy_username: str | None = None
+    ) -> list[str]:
         """返回当前所有录制会话中已识别的游戏账号列表（去重）。"""
         with self._lock:
             ids = set()
             for sessions in self._sessions.values():
                 for s in sessions:
-                    if s.get("_ghost"):
+                    if s.get("_ghost") or not self._owner_visible(
+                        s, proxy_username
+                    ):
                         continue
                     gid = s.get("game_id")
                     if gid:
@@ -676,14 +854,20 @@ class RecordingPool:
             return sorted(ids)
 
     # ── 录制管理 Tab API ─────────────────────
+    def _find_session_by_sid_locked(self, sid: str) -> tuple[str, dict] | None:
+        for ip, sessions in self._sessions.items():
+            for session in sessions:
+                if session.get("sid") == sid or session.get("recording_id") == sid:
+                    return ip, session
+        return None
+
     def get_extracted_payloads(self, sid: str) -> list[bytes]:
         """返回指定会话（sid）的 0A 00 09 加密区列表（供 UI 展示）"""
         with self._lock:
-            ip = sid.rsplit("#", 1)[0]
-            for s in self._sessions.get(ip, []):
-                if s["sid"] == sid:
-                    pool = self._session_pool(s)
-                    return [item.get("payload") or b"" for item in pool]
+            found = self._find_session_by_sid_locked(sid)
+            if found:
+                pool = self._session_pool(found[1])
+                return [item.get("payload") or b"" for item in pool]
         return []
 
     @staticmethod
@@ -707,38 +891,57 @@ class RecordingPool:
         供录制管理 Tab 列表：每条含 payload、来源标签（01 / 3366）。
         """
         with self._lock:
-            ip = sid.rsplit("#", 1)[0]
-            for s in self._sessions.get(ip, []):
-                if s["sid"] == sid:
-                    pool = self._session_pool(s)
-                    rows = []
-                    for item in pool:
-                        raw = item.get("source") or "01"
-                        if str(raw).startswith("3366"):
-                            lbl = "3366"
-                        else:
-                            lbl = "01"
-                        rows.append({
-                            "payload": item.get("payload") or b"",
-                            "raw_packet": item.get("raw_packet") or b"",
-                            "source": lbl,
-                            "source_detail": str(raw),
-                            "anchor_kind": item.get("anchor_kind") or "",
-                        })
-                    return rows
+            found = self._find_session_by_sid_locked(sid)
+            if found:
+                pool = self._session_pool(found[1])
+                rows = []
+                for item in pool:
+                    raw = item.get("source") or "01"
+                    if str(raw).startswith("3366"):
+                        lbl = "3366"
+                    else:
+                        lbl = "01"
+                    rows.append({
+                        "payload": item.get("payload") or b"",
+                        "raw_packet": item.get("raw_packet") or b"",
+                        "source": lbl,
+                        "source_detail": str(raw),
+                        "anchor_kind": item.get("anchor_kind") or "",
+                    })
+                return rows
         return []
 
     def get_game_id_for_sid(self, sid: str) -> str:
         """根据 sid 返回对应会话的 game_id（用于轻量更新时定位行）"""
         with self._lock:
-            ip = sid.rsplit("#", 1)[0]
-            for s in self._sessions.get(ip, []):
-                if s["sid"] == sid:
-                    gid = (s.get("game_id") or "").strip()
-                    if not gid and (s.get("ace_user_3366") or s.get("has_3366_key")):
-                        return f"待识别-{ip}"
-                    return gid or f"待识别-{ip}"
+            found = self._find_session_by_sid_locked(sid)
+            if found:
+                ip, s = found
+                gid = (s.get("game_id") or "").strip()
+                if not gid and (s.get("ace_user_3366") or s.get("has_3366_key")):
+                    return f"待识别-{ip}"
+                return gid or f"待识别-{ip}"
         return ""
+
+    def get_counts_for_sid(self, sid: str) -> tuple[int, int]:
+        """返回单次 recording_id 对应的 (01模板数, 3366模板数)。"""
+        with self._lock:
+            found = self._find_session_by_sid_locked(sid)
+            if not found:
+                return 0, 0
+            pool = self._session_pool(found[1])
+            n3366 = sum(
+                1 for item in pool
+                if str(item.get("source", "")).startswith("3366")
+            )
+            return len(pool) - n3366, n3366
+
+    def get_last_record_at_for_sid(self, sid: str) -> float:
+        with self._lock:
+            found = self._find_session_by_sid_locked(sid)
+            if not found:
+                return 0.0
+            return float(found[1].get("last_record_at", 0.0) or 0.0)
 
     def get_aggregated_counts_for_game_id(self, game_id: str) -> tuple[int, int]:
         """返回该 game_id 下所有会话聚合的 (count_01, count_3366)"""
@@ -814,13 +1017,12 @@ class RecordingPool:
 
     def get_all_sessions(self) -> list[dict]:
         """
-        返回按游戏用户 ID 聚合的会话摘要，供录制管理 Tab 全量刷新。
-        每行：游戏用户ID | 01数 | 33数 | 来源IP | 状态。
+        返回每个 recording_id 的会话摘要，供录制管理 Tab 全量刷新。
+        不再把同游戏ID的多轮录制或不同代理账号合并成一行。
         过滤掉“幽灵”会话。
         """
         with self._lock:
-            # 先收集所有非幽灵会话的原始数据
-            raw_list: list[dict] = []
+            result: list[dict] = []
             for ip, sessions in self._sessions.items():
                 for s in sessions:
                     if s.get("_ghost"):
@@ -835,9 +1037,12 @@ class RecordingPool:
                     gid = (s.get("game_id") or "").strip()
                     if not gid and (s.get("ace_user_3366") or s.get("has_3366_key")):
                         gid = f"待识别-{ip}"
-                    raw_list.append({
+                    result.append({
                         "sid": s["sid"],
+                        "recording_id": s.get("recording_id") or s["sid"],
+                        "proxy_username": self._session_owner(s),
                         "ip": ip,
+                        "ips": list(s.get("source_ips") or [ip]),
                         "game_id": gid or f"待识别-{ip}",
                         "count_01": n01,
                         "count_3366": n3366,
@@ -848,39 +1053,13 @@ class RecordingPool:
                         "product_name_3366": s.get("product_name_3366", ""),
                         "count_3366_raw": len(s.get("raw_3366", [])),
                         "last_record_at": s.get("last_record_at", 0.0),
+                        "created_at": s.get("created_at", 0.0),
+                        "connections": list(s.get("connections") or []),
+                        "connection_history": list(
+                            s.get("connection_history") or s.get("connections") or []
+                        ),
+                        "connection_details": dict(s.get("connection_details") or {}),
                     })
-            # 按 game_id 聚合
-            agg: dict[str, dict] = {}
-            for r in raw_list:
-                gid = r["game_id"]
-                if gid not in agg:
-                    agg[gid] = {
-                        "game_id": gid,
-                        "count_01": 0,
-                        "count_3366": 0,
-                        "count": 0,
-                        "ips": [],
-                        "active": False,
-                        "sid": r["sid"],
-                        "ace_product": r.get("ace_product", ""),
-                        "product_hex_3366": r.get("product_hex_3366", ""),
-                        "product_name_3366": r.get("product_name_3366", ""),
-                        "count_3366_raw": 0,
-                        "last_record_at": 0.0,
-                    }
-                agg[gid]["count_01"] += r["count_01"]
-                agg[gid]["count_3366"] += r["count_3366"]
-                agg[gid]["count"] += r["count"]
-                agg[gid]["count_3366_raw"] += r.get("count_3366_raw", 0)
-                if r["ip"] not in agg[gid]["ips"]:
-                    agg[gid]["ips"].append(r["ip"])
-                if r["active"]:
-                    agg[gid]["active"] = True
-                # 取多个会话中最新的录制时间
-                t = r.get("last_record_at", 0.0) or 0.0
-                if t > agg[gid]["last_record_at"]:
-                    agg[gid]["last_record_at"] = t
-            result = list(agg.values())
             # 排序：活跃优先，再按最近录制时间倒序，最后待识别排末尾
             def _sk(x: dict):
                 g = (x.get("game_id") or "").strip()
@@ -912,7 +1091,7 @@ class RecordingPool:
 
     def export_to_file(self, path: str) -> tuple[bool, str]:
         """
-        导出所有会话为 JSON（v5 格式，含 type-9 结构化记录元数据）。
+        导出所有会话为 JSON（v6 格式，含录制ID和代理账号归属）。
         只存储提取好的 pool items（payload/crc/routing/account_id），
         不保留原始 01 包，文件更小、可读性更高。
         """
@@ -947,6 +1126,15 @@ class RecordingPool:
                         ]
                         ip_list.append({
                             "sid":        s["sid"],
+                            "recording_id": s.get("recording_id") or s["sid"],
+                            "proxy_username": self._session_owner(s),
+                            "source_ips": list(s.get("source_ips") or [ip]),
+                            "connection_history": list(
+                                s.get("connection_history") or []
+                            ),
+                            "connection_details": dict(
+                                s.get("connection_details") or {}
+                            ),
                             "game_id":    s.get("game_id", ""),
                             "game_id_source": s.get("game_id_source", ""),
                             "ace_user_01": s.get("ace_user_01", ""),
@@ -961,7 +1149,7 @@ class RecordingPool:
                         })
                     if ip_list:
                         data[ip] = ip_list
-            payload = {"version": 5, "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            payload = {"version": 6, "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                        "sessions": data}
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
@@ -977,6 +1165,7 @@ class RecordingPool:
         从 JSON 文件导入。
         支持所有历史格式：
           v4/v5：pool_items（v5 额外含 type-9 schema/分片/hash）
+          v6：recording_id + proxy_username + source_ips
           v2/v3：pkts（旧格式，含原始 01 包，自动转换为 pool_items）
         """
         try:
@@ -992,7 +1181,12 @@ class RecordingPool:
                     existing     = self._sessions.setdefault(ip, [])
                     existing_sids = {s["sid"] for s in existing}
                     for item in val:
-                        sid = item.get("sid") or f"{ip}#{len(existing)}"
+                        recording_id = (
+                            item.get("recording_id")
+                            or item.get("sid")
+                            or self._new_recording_id()
+                        )
+                        sid = recording_id
                         if sid in existing_sids and not overwrite:
                             skipped += 1
                             continue
@@ -1029,6 +1223,20 @@ class RecordingPool:
                                     continue
                             new_s = {
                                 "sid":        sid,
+                                "recording_id": recording_id,
+                                "proxy_username": (
+                                    item.get("proxy_username")
+                                    if version >= 6
+                                    else "legacy-shared"
+                                ) or "legacy-shared",
+                                "source_ips": list(item.get("source_ips") or [ip]),
+                                "connections": [],
+                                "connection_history": list(
+                                    item.get("connection_history") or []
+                                ),
+                                "connection_details": dict(
+                                    item.get("connection_details") or {}
+                                ),
                                 "game_id":    item.get("game_id", ""),
                                 "game_id_source": item.get("game_id_source", ""),
                                 "ace_user_01": item.get("ace_user_01", ""),
@@ -1060,6 +1268,20 @@ class RecordingPool:
                                     continue
                             new_s = {
                                 "sid":        sid,
+                                "recording_id": recording_id,
+                                "proxy_username": (
+                                    item.get("proxy_username")
+                                    if version >= 6
+                                    else "legacy-shared"
+                                ) or "legacy-shared",
+                                "source_ips": list(item.get("source_ips") or [ip]),
+                                "connections": [],
+                                "connection_history": list(
+                                    item.get("connection_history") or []
+                                ),
+                                "connection_details": dict(
+                                    item.get("connection_details") or {}
+                                ),
                                 "game_id":    item.get("game_id", ""),
                                 "game_id_source": item.get("game_id_source", ""),
                                 "ace_user_01": item.get("ace_user_01", ""),

@@ -43,6 +43,7 @@ from core.pool import RecordingPool
 from core.protocol_3366 import merge_3366_product_registry
 from core.managers import UserManager
 from core.special_capture import SpecialCaptureManager
+from core.server import Socks5Server
 
 
 def make_record(selector: int, key_index: int, fill: int, size: int) -> bytes:
@@ -457,6 +458,145 @@ class ArenaReplayTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(pool._sessions["127.0.0.3"][0]["pool_items"], [])
         self.assertEqual(pool._sessions["127.0.0.3"][0]["_join_conn_id"], "new-conn")
+
+    def test_recordings_are_isolated_by_proxy_account_on_same_ip(self):
+        pool = RecordingPool()
+        ip = "127.0.0.9"
+        self.assertTrue(pool.new_session(ip, "proxy_a", "conn-a"))
+        self.assertTrue(pool.new_session(ip, "proxy_b", "conn-b"))
+        pool.update_connection_target(ip, "proxy_a", "conn-a", "TARGET_A:10001")
+        pool.mark_connection_protocol(ip, "proxy_a", "conn-a", "01")
+        pool.mark_connection_protocol(ip, "proxy_a", "conn-a", "3366")
+
+        pool.apply_3366_handshake_user_id(ip, "UID-A", "proxy_a")
+        pool.apply_3366_handshake_user_id(ip, "UID-B", "proxy_b")
+        pool.append_from_3366_plain(
+            ip,
+            b"",
+            [{"payload": b"AAAA", "source": "3366_09"}],
+            proxy_username="proxy_a",
+        )
+        pool.append_from_3366_plain(
+            ip,
+            b"",
+            [{"payload": b"BBBB", "source": "3366_09"}],
+            proxy_username="proxy_b",
+        )
+
+        sessions = pool.get_all_sessions()
+        self.assertEqual(
+            {session["proxy_username"] for session in sessions},
+            {"proxy_a", "proxy_b"},
+        )
+        self.assertEqual(len({s["recording_id"] for s in sessions}), 2)
+        session_a = next(s for s in sessions if s["proxy_username"] == "proxy_a")
+        self.assertEqual(session_a["connection_history"], ["conn-a"])
+        self.assertEqual(
+            session_a["connection_details"]["conn-a"],
+            {
+                "remote_endpoint": "TARGET_A:10001",
+                "protocols": ["01", "3366"],
+            },
+        )
+        self.assertEqual(
+            pool.find_pool_by_game_id("UID-A", "proxy_a")["pool_33"][0]["payload"],
+            b"AAAA",
+        )
+        self.assertIsNone(pool.find_pool_by_game_id("UID-A", "proxy_b"))
+
+        pool.stop(ip, proxy_username="proxy_a", conn_id="conn-a")
+        states = {s["proxy_username"]: s["active"] for s in pool.get_all_sessions()}
+        self.assertFalse(states["proxy_a"])
+        self.assertTrue(states["proxy_b"])
+
+    def test_recording_export_v6_preserves_owner_and_recording_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "recordings.json")
+            source = RecordingPool()
+            source.new_session("127.0.0.10", "proxy_a", "conn-a")
+            source.apply_3366_handshake_user_id(
+                "127.0.0.10", "UID-A", "proxy_a"
+            )
+            source.append_from_3366_plain(
+                "127.0.0.10",
+                b"",
+                [{"payload": b"AAAA", "source": "3366_09"}],
+                proxy_username="proxy_a",
+            )
+            original_id = source.get_all_sessions()[0]["recording_id"]
+            ok, _message = source.export_to_file(path)
+            self.assertTrue(ok)
+            with open(path, encoding="utf-8") as f:
+                exported = json.load(f)
+            self.assertEqual(exported["version"], 6)
+
+            restored = RecordingPool()
+            ok, _message = restored.import_from_file(path)
+            self.assertTrue(ok)
+            session = restored.get_all_sessions()[0]
+            self.assertEqual(session["recording_id"], original_id)
+            self.assertEqual(session["proxy_username"], "proxy_a")
+            self.assertIsNotNone(
+                restored.find_pool_by_game_id("UID-A", "proxy_a")
+            )
+            self.assertIsNone(
+                restored.find_pool_by_game_id("UID-A", "proxy_b")
+            )
+
+    def test_strict_block_only_closes_same_proxy_account_on_shared_ip(self):
+        class Writer:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        server = Socks5Server(1080, mode="replay")
+        writer_a = Writer()
+        writer_b = Writer()
+        server._user_active_conns = {
+            "proxy_a": {"1.2.3.4": {"conn-a"}},
+            "proxy_b": {"1.2.3.4": {"conn-b"}},
+        }
+        server._conn_client_writers = {
+            "conn-a": writer_a,
+            "conn-b": writer_b,
+        }
+        server._block_ip_strict("proxy_a", "1.2.3.4", "test")
+        self.assertTrue(writer_a.closed)
+        self.assertFalse(writer_b.closed)
+        self.assertIn(("proxy_a", "1.2.3.4"), server._strict_blocked_ips)
+
+    def test_legacy_recording_import_remains_shared_for_compatibility(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "legacy-v5.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "version": 5,
+                        "sessions": {
+                            "8.8.8.8": [{
+                                "sid": "8.8.8.8#legacy",
+                                "game_id": "UID-OLD",
+                                "pool_items": [{
+                                    "payload": "41414141",
+                                    "source": "3366_09",
+                                }],
+                            }],
+                        },
+                    },
+                    f,
+                )
+            pool = RecordingPool()
+            ok, _message = pool.import_from_file(path)
+            self.assertTrue(ok)
+            self.assertEqual(
+                pool.get_all_sessions()[0]["proxy_username"],
+                "legacy-shared",
+            )
+            self.assertIsNotNone(
+                pool.find_pool_by_game_id("UID-OLD", "any-new-user")
+            )
 
 
 if __name__ == "__main__":

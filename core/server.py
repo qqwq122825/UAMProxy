@@ -58,6 +58,11 @@ def _is_special_capture_mode(mode: str) -> bool:
     )
 
 
+def _account_ip_scope(username: str, client_ip: str) -> tuple[str, str]:
+    """代理账号是会话隔离边界；IP 仅用于同账号下的并发连接关联。"""
+    return ((username or "").strip(), (client_ip or "").strip())
+
+
 def _format_01_replace_mode_label(detail: dict) -> str:
     """
     01 重放替换日志首段的策略说明（中文）。
@@ -105,8 +110,8 @@ class Socks5Server:
         self._conn_live_gid: dict[str, str] = {}
         # 流重组缓冲区：应对 TCP 分包（一个 01 包拆成多次 read）conn_id -> bytearray
         self._stream_bufs: dict[str, bytearray] = {}
-        # 多开控制：username → 当前活跃的 conn_id 集合
-        self._user_active_conns: dict[str, set[str]] = {}
+        # 多开/会话分组：username → client_ip → conn_id 集合
+        self._user_active_conns: dict[str, dict[str, set[str]]] = {}
         # conn_id → client StreamWriter（用于踢人时强制断开）
         self._conn_client_writers: dict[str, "asyncio.StreamWriter"] = {}
         # 33 66 流状态（上行 / 下行分离）
@@ -114,15 +119,14 @@ class Socks5Server:
         self._st3366_down: dict[str, Conn3366State] = {}
         self._3366_key_logged: set[str] = set()
         self._3366_prod_logged: set[str] = set()
-        # client_ip → (key, iv)，仅当产品配置了可解密策略时写入
-        self._3366_aes: dict[str, tuple[bytes, bytes]] = {}
-        # client_ip → 产品 ID 8hex（如 0000094E）
-        self._3366_prod_hex: dict[str, str] = {}
+        # (代理账号, client_ip) → 3366 会话密钥/产品
+        self._3366_aes: dict[tuple[str, str], tuple[bytes, bytes]] = {}
+        self._3366_prod_hex: dict[tuple[str, str], str] = {}
         # conn_id → 已提示「有产品但未配置解密」
         self._3366_decrypt_skip_logged: set[str] = set()
         self._3366_unknown_strat_logged: set[str] = set()
         # 自动断线：01 包达阈值后，该 IP 的新连接将被拒绝，直到所有连接断开
-        self._auto_disconnect_blocked: set[str] = set()
+        self._auto_disconnect_blocked: set[tuple[str, str]] = set()
         # 携带 33（3366）数据的 conn_id 集合，用于 01 满时断开 33 连接
         self._conn_carries_3366: set[str] = set()
         # 录制阻止：uid 正在被重放时，标记该 conn_id 不录制（01 不入池；33 直接断开连接）
@@ -139,15 +143,15 @@ class Socks5Server:
         self._https_block_conns: set[str] = set()
         # 严格模式阻断：无录制/无匹配时标记该 client_ip，所有后续连接（01+3366）全部拒绝
         # 该 IP 完全断线后自动清除，重新上线时重新判断
-        self._strict_blocked_ips: set[str] = set()
+        self._strict_blocked_ips: set[tuple[str, str]] = set()
         # conn_id → 3366 10_01 解析出的游戏账户（供下发拦截统计「游戏账户」列显示）
         self._3366_hs_uid: dict[str, str] = {}
         # client_ip → 游戏 UID（跨 conn_id 共享；01 连接和 3366 连接各自写入，互为兜底）
-        self._ip_game_uid: dict[str, str] = {}
+        self._ip_game_uid: dict[tuple[str, str], str] = {}
         # 该 IP 已出现暗区国服特征首帧：上行 10 01 总长 == HS_LEN_AB_BREAKOUT_CN_1001（75B）
-        self._3366_ab_cn_first_hs: set[str] = set()
+        self._3366_ab_cn_first_hs: set[tuple[str, str]] = set()
         # 重放就绪日志去重：同 IP 首次匹配成功后记录，后续连接静默匹配
-        self._replay_ready_logged: set[str] = set()
+        self._replay_ready_logged: set[tuple[str, str]] = set()
         # IP 已有 UID 时，新连接须先收到 42B 加入包才允许 0A 00 23 匹配（防止早到的旧包误匹配）
         self._replay_await_join: set[str] = set()
         # 已经由 42B 加入包解锁的连接：0A 00 23 不在录制池时直接丢弃，不走重试逻辑
@@ -281,7 +285,9 @@ class Socks5Server:
 
                     # 鉴权成功后启动录制会话（AUTH_OK 之后，保证日志顺序正确）
                     if actual_mode == "record" and not _is_special_capture_mode(actual_mode):
-                        _is_new_rec = recording_pool.new_session(client_ip)
+                        _is_new_rec = recording_pool.new_session(
+                            client_ip, username, conn_id
+                        )
                         _rec_joined = True
                         if _is_new_rec:
                             _event("RECORD", self.label, f"[{client_ip}] 开始录制会话")
@@ -296,7 +302,9 @@ class Socks5Server:
                     # ── 重放端口：仅首条连接打上线日志 ────
                     if actual_mode == "replay" and is_first_conn:
                         # 允许边录边播：不强制停止录制，直接获取池引用
-                        preview_pools = recording_pool.get_all_ip_pools(client_ip)
+                        preview_pools = recording_pool.get_all_ip_pools(
+                            client_ip, username
+                        )
                         if preview_pools:
                             known_gids = [g for g in preview_pools.keys() if g]
                             pool_total = sum(
@@ -352,6 +360,10 @@ class Socks5Server:
             dst_str = f"{target_host}:{target_port}"
             _event("CONNECT", self.label,
                    f"[{username}] → {dst_str}")
+            if actual_mode == "record" and not _is_special_capture_mode(actual_mode):
+                recording_pool.update_connection_target(
+                    client_ip, username, conn_id, dst_str
+                )
             ui_mode = "capture" if _is_special_capture_mode(actual_mode) else actual_mode
             log_bus.conn_added.emit(conn_id, conn_id, dst_str, username, ui_mode)
             if ui_mode == "capture":
@@ -415,7 +427,7 @@ class Socks5Server:
 
             # 重放模式：快照该 IP 所有录制会话，等发现游戏ID后再选具体池
             if actual_mode == "replay":
-                all_pools = recording_pool.get_all_ip_pools(client_ip)
+                all_pools = recording_pool.get_all_ip_pools(client_ip, username)
                 if all_pools:
                     self._replay_all_pools[conn_id]   = all_pools
                     self._replay_gid_checked[conn_id] = False
@@ -423,7 +435,7 @@ class Socks5Server:
                     log_bus.conn_mode_update.emit(client_ip, "待匹配")
                 else:
                     # 同 IP 无录制：检查是否有其他 IP 录制过（跨 IP 匹配）
-                    global_gids = recording_pool.get_all_game_ids()
+                    global_gids = recording_pool.get_all_game_ids(username)
                     if global_gids:
                         # 有全局录制数据，保持等待状态，游戏ID到来后跨 IP 查找
                         self._replay_all_pools[conn_id]   = {}   # 同IP无，跨IP待查
@@ -441,7 +453,9 @@ class Socks5Server:
                         _event("DEBUG", self.label,
                                f"[{conn_id}] 重放 {dst_str}：全局无录制池，待 33/01 出 UID 后再严格判定")
                 # IP 已有 UID → 需先等到 42B 加入包再做 UID 匹配，防止旧 0A 00 23 包误触发
-                if self._ip_game_uid.get(client_ip):
+                if self._ip_game_uid.get(
+                    _account_ip_scope(username, client_ip)
+                ):
                     self._replay_await_join.add(conn_id)
 
             # ⑤ 双向转发
@@ -484,7 +498,9 @@ class Socks5Server:
             self._total_dn_pkts += dn_count[0]
             if _rec_joined:
                 # 引用计数 -1；所有连接都断开时才真正停止（rec_total > 0）
-                rec_total, game_id = recording_pool.stop(client_ip)
+                rec_total, game_id = recording_pool.stop(
+                    client_ip, proxy_username=username, conn_id=conn_id
+                )
                 _rec_joined = False  # 已正常 stop，finally 不再重复调用
                 gid_info = f"  游戏ID=[{game_id}]" if game_id else ""
                 rec_info = f"  [录制已停止: {rec_total} 包]{gid_info}" if rec_total > 0 else ""
@@ -503,7 +519,9 @@ class Socks5Server:
         finally:
             # 兜底：若因握手失败/异常提前退出，确保 recording_pool 引用计数归还
             if _rec_joined:
-                recording_pool.stop(client_ip)
+                recording_pool.stop(
+                    client_ip, proxy_username=username, conn_id=conn_id
+                )
             self._active_conns -= 1
             self._replay_index.pop(conn_id, None)
             self._ace_replay_assemblers.pop(conn_id, None)
@@ -553,42 +571,48 @@ class Socks5Server:
                     ip_map.pop(client_ip, None)
                 if not ip_map:
                     self._user_active_conns.pop(username, None)
-            # 该 IP 所有连接已断开时：清理 IP 级共享状态 + 自动断线处理
-            _remaining_for_ip = 0
-            for _uname, ip_map in self._user_active_conns.items():
-                _remaining_for_ip += len(ip_map.get(client_ip, set()))
-            if _remaining_for_ip == 0:
+            # 该代理账号 + IP 的所有连接已断开时，清理其共享状态。
+            _scope = _account_ip_scope(username, client_ip)
+            _remaining_for_scope = len(
+                self._user_active_conns.get(username, {}).get(client_ip, set())
+            )
+            if _remaining_for_scope == 0:
                 # _ip_game_uid 保留：下次连接时直接回填 UID，
                 # 避免握手延迟导致拦截状态表行消失（_3366_aes 同理持久化）
-                self._strict_blocked_ips.discard(client_ip)   # IP 全部断线 → 解除阻断
-                self._3366_ab_cn_first_hs.discard(client_ip)
-                self._replay_ready_logged.discard(client_ip)
-                if actual_mode == "record" and client_ip in self._auto_disconnect_blocked:
-                    self._auto_disconnect_blocked.discard(client_ip)
+                self._strict_blocked_ips.discard(_scope)
+                self._3366_ab_cn_first_hs.discard(_scope)
+                self._replay_ready_logged.discard(_scope)
+                if actual_mode == "record" and _scope in self._auto_disconnect_blocked:
+                    self._auto_disconnect_blocked.discard(_scope)
                     _event("RECORD", self.label, f"[{client_ip}] 所有连接已断开，可重新连接")
                     try:
                         log_bus.record_updated.emit()
                     except Exception:
                         pass
-            elif actual_mode == "record" and client_ip in self._auto_disconnect_blocked:
+            elif actual_mode == "record" and _scope in self._auto_disconnect_blocked:
                 # 还有其他连接存活，仅做原有的自动断线检查
                 pass
             _safe_close(writer)
             log_bus.conn_closed.emit(conn_id)
 
-    def _block_ip_strict(self, client_ip: str, reason: str) -> None:
-        """严格模式：标记该 IP 并立即踢掉所有活跃连接（01 + 3366 同时断开）。
-        IP 完全断线后 _on_disconnect 会自动解除标记。"""
-        self._strict_blocked_ips.add(client_ip)
-        _event("BLOCK", self.label, f"[{client_ip}] 严格阻断：{reason}，踢出所有活跃连接")
-        for _uname, ip_map in self._user_active_conns.items():
-            for cid in list(ip_map.get(client_ip, set())):
-                w = self._conn_client_writers.get(cid)
-                if w:
-                    try:
-                        w.close()
-                    except Exception:
-                        pass
+    def _block_ip_strict(
+        self, username: str, client_ip: str, reason: str
+    ) -> None:
+        """严格模式：只阻断该代理账号 + IP 下的 01/3366 连接。"""
+        scope = _account_ip_scope(username, client_ip)
+        self._strict_blocked_ips.add(scope)
+        _event(
+            "BLOCK", self.label,
+            f"[{username}@{client_ip}] 严格阻断：{reason}，踢出该账号的活跃连接",
+        )
+        ip_map = self._user_active_conns.get(username, {})
+        for cid in list(ip_map.get(client_ip, set())):
+            w = self._conn_client_writers.get(cid)
+            if w:
+                try:
+                    w.close()
+                except Exception:
+                    pass
 
     async def _connect_remote(self, atype, target_host, target_port):
         ext = self.external_proxy
@@ -670,6 +694,7 @@ class Socks5Server:
         shared_ts: list = None,
     ):
         capture_only = _is_special_capture_mode(mode)
+        account_scope = _account_ip_scope(username, client_ip)
 
         def _emit_progress_detail(conn_id: str, client_ip: str) -> None:
             """汇总 01/33 进度并发送 detail 信号（33 细分 09/21/01回退）"""
@@ -802,7 +827,7 @@ class Socks5Server:
                         _log_exc("special_capture_raw_tap")
 
                 # ── 严格模式 IP 阻断：无录制/无匹配时该 IP 所有通道全部拒绝 ──────────
-                if mode == "replay" and client_ip in self._strict_blocked_ips:
+                if mode == "replay" and account_scope in self._strict_blocked_ips:
                     log_bus.conn_detail.emit(
                         client_ip,
                         f"[断开] 严格阻断（{direction}）：无录制，所有通道已关闭")
@@ -866,6 +891,9 @@ class Socks5Server:
                             if pos + pkt_len > len(rec_buf):
                                 break
                             sub = bytes(rec_buf[pos : pos + pkt_len])
+                            recording_pool.mark_connection_protocol(
+                                client_ip, username, conn_id, "01"
+                            )
                             # 录制模式向数据流面板发送组装好的单个原始 01 帧（panel②：分包还原/替换前）
                             log_bus.stream_parsed_data.emit(conn_id, direction, "01", len(sub), sub)
                             try:
@@ -888,7 +916,9 @@ class Socks5Server:
                                         # 第二步：42握手包之后的帧，尝试提取 uid
                                         _rec_uid = _parse_ace_account_id(sub)
                                         if _rec_uid:
-                                            if recording_pool.is_game_id_being_replayed(_rec_uid):
+                                            if recording_pool.is_game_id_being_replayed(
+                                                _rec_uid, username
+                                            ):
                                                 # uid 正在重放：42包和本帧都不入池，标记透传
                                                 self._pending_01_handshake.pop(conn_id, None)
                                                 self._record_blocked_conns.add(conn_id)
@@ -897,34 +927,44 @@ class Socks5Server:
                                             else:
                                                 # uid 不在重放：42包无需入池，本帧正常入池
                                                 self._pending_01_handshake.pop(conn_id, None)
-                                                recording_pool.append(client_ip, sub)
+                                                recording_pool.append(
+                                                    client_ip, sub, username
+                                                )
                                         else:
                                             # 本帧仍无 uid（少见），42包无需入池，本帧正常入池，退出等待
                                             self._pending_01_handshake.pop(conn_id, None)
-                                            recording_pool.append(client_ip, sub)
+                                            recording_pool.append(
+                                                client_ip, sub, username
+                                            )
                                     else:
                                         if len(sub) == 42:
                                             # 新连接再次出现加入包时，录制池按新生命周期清空。
                                             recording_pool.note_join_packet(
-                                                client_ip, conn_id
+                                                client_ip, conn_id, username
                                             )
                                             # 第一步：暂存，等下一帧判断 uid
                                             self._pending_01_handshake[conn_id] = sub
                                         else:
-                                            recording_pool.append(client_ip, sub)
+                                            recording_pool.append(
+                                                client_ip, sub, username
+                                            )
                                 except Exception:
                                     _log_exc("pending_01_handshake")
                                 # 自动断线：01 包达阈值且存在 33 录制时，断开携带 33 的连接
                                 try:
-                                    n01 = recording_pool.get_active_01_count(client_ip)
-                                    n33 = recording_pool.get_active_33_count(client_ip)
+                                    n01 = recording_pool.get_active_01_count(
+                                        client_ip, username
+                                    )
+                                    n33 = recording_pool.get_active_33_count(
+                                        client_ip, username
+                                    )
                                     thresh = app_config.get("auto_disconnect_01_threshold") or 100
                                     if (n01 >= thresh and n33 > 0 and
-                                            client_ip not in self._auto_disconnect_blocked):
-                                        self._auto_disconnect_blocked.add(client_ip)
+                                            account_scope not in self._auto_disconnect_blocked):
+                                        self._auto_disconnect_blocked.add(account_scope)
                                         conns_33 = [
-                                            cid for _uname, ip_map in self._user_active_conns.items()
-                                            for cid in ip_map.get(client_ip, set())
+                                            cid for cid in self._user_active_conns
+                                            .get(username, {}).get(client_ip, set())
                                             if cid in self._conn_carries_3366
                                         ]
                                         for cid in conns_33:
@@ -1024,13 +1064,15 @@ class Socks5Server:
                                     live_gid  = _parse_ace_account_id(sub)
                                     if live_gid:
                                         self._conn_live_gid[conn_id] = str(live_gid)
-                                        self._ip_game_uid[client_ip] = str(live_gid)
+                                        self._ip_game_uid[account_scope] = str(live_gid)
                                         log_bus.conn_game_id_update.emit(client_ip, str(live_gid), "重放")
                                     all_pools = self._replay_all_pools.get(conn_id, {})
                                     matched   = all_pools.get(live_gid) if live_gid else None
                                     # 同IP池未命中 → 跨IP按游戏账号查找
                                     if not matched and live_gid:
-                                        matched = recording_pool.find_pool_by_game_id(str(live_gid))
+                                        matched = recording_pool.find_pool_by_game_id(
+                                            str(live_gid), username
+                                        )
                                         if matched:
                                             _event("REPLAY", self.label,
                                                    f"[{username}({client_ip})] 跨IP匹配成功："
@@ -1054,8 +1096,8 @@ class Socks5Server:
                                             client_ip, 0, n01, 0, n33, 0, n09, 0, n21, 0,
                                         )
                                         # 同 IP 只打一次"重放就绪"，后续连接静默匹配
-                                        if client_ip not in self._replay_ready_logged:
-                                            self._replay_ready_logged.add(client_ip)
+                                        if account_scope not in self._replay_ready_logged:
+                                            self._replay_ready_logged.add(account_scope)
                                             log_bus.conn_detail.emit(
                                                 client_ip,
                                                 f"[重放就绪] 游戏ID=[{live_gid}]  01池={n01} 33池={n33}")
@@ -1099,8 +1141,10 @@ class Socks5Server:
                                                         client_ip,
                                                         f"[断开] 无匹配录制  游戏ID={gid_str}  （严格模式，01+3366全断）")
                                                     log_bus.conn_mode_update.emit(client_ip, "无匹配录制")
-                                                    self._block_ip_strict(client_ip,
-                                                                           f"01通道无匹配录制 游戏ID={gid_str}")
+                                                    self._block_ip_strict(
+                                                        username, client_ip,
+                                                        f"01通道无匹配录制 游戏ID={gid_str}",
+                                                    )
                                                 else:
                                                     # 宽松模式：不断开，但后续上行 01 包全部丢弃（不透传）
                                                     _event("WARN", self.label,
@@ -1130,7 +1174,9 @@ class Socks5Server:
                                     _rc_all = self._replay_all_pools.get(conn_id, {})
                                     _rc_matched = _rc_all.get(str(_recheck_uid)) if _recheck_uid else None
                                     if not _rc_matched and _recheck_uid:
-                                        _rc_matched = recording_pool.find_pool_by_game_id(str(_recheck_uid))
+                                        _rc_matched = recording_pool.find_pool_by_game_id(
+                                            str(_recheck_uid), username
+                                        )
                                     if _rc_matched:
                                         # UID 在录制池 → 重连，从 0 开始重放
                                         self._replay_pools[conn_id] = _rc_matched
@@ -1144,7 +1190,7 @@ class Socks5Server:
                                                 _ri33_reset[_k33] = [0, 0]
                                         if _recheck_uid:
                                             self._conn_live_gid[conn_id] = str(_recheck_uid)
-                                            self._ip_game_uid[client_ip] = str(_recheck_uid)
+                                            self._ip_game_uid[account_scope] = str(_recheck_uid)
                                             log_bus.conn_game_id_update.emit(
                                                 client_ip, str(_recheck_uid), "重放")
                                         log_bus.conn_detail.emit(
@@ -1169,11 +1215,13 @@ class Socks5Server:
                                         if mode == "replay" and conn_id in self._replay_pools:
                                             _game_uid = self._replay_pools[conn_id].get("game_id")
                                         elif mode == "record":
-                                            _s_ids = recording_pool.get_active_session_ace_ids(client_ip)
+                                            _s_ids = recording_pool.get_active_session_ace_ids(
+                                                client_ip, username
+                                            )
                                             _game_uid = _s_ids[0] if _s_ids[0] else (_s_ids[1] if _s_ids[1] else "")
                                     # 跨连接兜底：01 连接下发时 uid 可能由 3366 连接写入（或反之）
                                     if not _game_uid:
-                                        _game_uid = self._ip_game_uid.get(client_ip, "")
+                                        _game_uid = self._ip_game_uid.get(account_scope, "")
                                     _proxy_user = username or ""
                                     if _game_uid and _proxy_user and str(_game_uid) != _proxy_user:
                                         _conn_label = f"{_game_uid}({_proxy_user})"
@@ -1255,15 +1303,19 @@ class Socks5Server:
                     )
 
                     def _on3366(fr: bytes, info: dict | None, sst: Conn3366State):
+                        if mode == "record":
+                            recording_pool.mark_connection_protocol(
+                                client_ip, username, conn_id, "3366"
+                            )
                         if direction == "↑UP":
                             if info and info.get("msg") == MSG_HANDSHAKE:
                                 if len(fr) == HS_LEN_AB_BREAKOUT_CN_1001:
-                                    self._3366_ab_cn_first_hs.add(client_ip)
+                                    self._3366_ab_cn_first_hs.add(account_scope)
                             _hs_uid_any = extract_handshake_user_id(fr)
                             if _hs_uid_any:
                                 self._3366_hs_uid[conn_id] = _hs_uid_any
                                 self._conn_live_gid[conn_id] = str(_hs_uid_any)
-                                self._ip_game_uid[client_ip] = str(_hs_uid_any)
+                                self._ip_game_uid[account_scope] = str(_hs_uid_any)
                                 # 只要拿到了 uid 就通知前端表格更新（无论之后是否匹配重放池）
                                 log_bus.conn_game_id_update.emit(client_ip, str(_hs_uid_any), mode if mode == "record" else "重放")
                             _hs_uid_check = _hs_uid_any
@@ -1284,7 +1336,7 @@ class Socks5Server:
                                     log_bus.dl_intercept_event.emit(_conn_label, "reset", "重放账号上线，重置统计")
                         if mode == "record" and direction == "↑UP":
                             # 阈值已触发（01满）：持续断开所有新建33连接，无论uid是否在重放
-                            if client_ip in self._auto_disconnect_blocked:
+                            if account_scope in self._auto_disconnect_blocked:
                                 if conn_id not in self._record_blocked_conns:
                                     self._record_blocked_conns.add(conn_id)
                                     _event("INFO", self.label,
@@ -1298,7 +1350,9 @@ class Socks5Server:
                                 return
                             _hs_uid = extract_handshake_user_id(fr)
                             if _hs_uid:
-                                if recording_pool.is_game_id_being_replayed(_hs_uid):
+                                if recording_pool.is_game_id_being_replayed(
+                                    _hs_uid, username
+                                ):
                                     # uid 正在被重放，断开此条 33 连接，阻止继续录制
                                     self._record_blocked_conns.add(conn_id)
                                     _event("INFO", self.label,
@@ -1311,7 +1365,7 @@ class Socks5Server:
                                             pass
                                 else:
                                     recording_pool.apply_3366_handshake_user_id(
-                                        client_ip, _hs_uid
+                                        client_ip, _hs_uid, username
                                     )
                         # 重放：33 10 01 握手帧含游戏用户 ID，优先于 01 0A 00 23 触发匹配
                         if mode == "replay" and direction == "↑UP":
@@ -1321,7 +1375,9 @@ class Socks5Server:
                                 matched = all_pools.get(_hs_uid)
                                 # 同IP池未命中 → 跨IP按游戏账号查找
                                 if not matched and _hs_uid:
-                                    matched = recording_pool.find_pool_by_game_id(str(_hs_uid))
+                                    matched = recording_pool.find_pool_by_game_id(
+                                        str(_hs_uid), username
+                                    )
                                     if matched:
                                         _event("REPLAY", self.label,
                                                f"[{username}({client_ip})] 跨IP匹配成功(33握手)："
@@ -1359,8 +1415,10 @@ class Socks5Server:
                                             client_ip,
                                             f"[断开] 33通道无匹配录制  游戏ID={gid_str}  （严格模式，01+3366全断）")
                                         log_bus.conn_mode_update.emit(client_ip, "无匹配录制")
-                                        self._block_ip_strict(client_ip,
-                                                               f"33通道无匹配录制 游戏ID={gid_str}")
+                                        self._block_ip_strict(
+                                            username, client_ip,
+                                            f"33通道无匹配录制 游戏ID={gid_str}",
+                                        )
                                     else:
                                         _event("WARN", "",
                                                f"[{username}] 33通道无匹配录制 游戏ID={gid_str}，透传（宽松模式）")
@@ -1378,7 +1436,7 @@ class Socks5Server:
                         # 重放上行且会执行 replace 时，由 on_frame_hex 发射 stream_parsed_data，避免 process_3366_chunk 流缓冲导致面板慢一步
                         will_replace = (
                             mode == "replay" and direction == "↑UP"
-                            and self._3366_aes.get(client_ip)
+                            and self._3366_aes.get(account_scope)
                             and self._replay_pools.get(conn_id)
                             and self._replay_index_33.get(conn_id)
                         )
@@ -1386,14 +1444,14 @@ class Socks5Server:
                             log_bus.stream_parsed_data.emit(conn_id, direction, "3366", len(fr), fr)
 
                         if sst.product_hex:
-                            self._3366_prod_hex[client_ip] = sst.product_hex
-                        pid = self._3366_prod_hex.get(client_ip)
+                            self._3366_prod_hex[account_scope] = sst.product_hex
+                        pid = self._3366_prod_hex.get(account_scope)
                         meta = reg.get(pid) if pid else None
                         strat = (meta or {}).get("decrypt") if meta else None
                         if pid:
                             _pn = ((meta or {}).get("name") or prod or "").strip()
                             recording_pool.set_session_3366_product(
-                                client_ip, pid, _pn
+                                client_ip, pid, _pn, username
                             )
 
                         down_st = self._st3366_down.get(conn_id)
@@ -1405,8 +1463,10 @@ class Socks5Server:
                             and down_st.key
                             and down_st.iv
                         ):
-                            self._3366_aes[client_ip] = (down_st.key, down_st.iv)
-                            recording_pool.set_session_3366_key_ready(client_ip)
+                            self._3366_aes[account_scope] = (down_st.key, down_st.iv)
+                            recording_pool.set_session_3366_key_ready(
+                                client_ip, username
+                            )
                         elif (
                             not pid
                             and down_st
@@ -1425,8 +1485,8 @@ class Socks5Server:
                                 _pid, _meta = single[0]
                                 _strat = _meta.get("decrypt")
                                 if _strat == "aes_cbc_4013":
-                                    self._3366_prod_hex[client_ip] = _pid
-                                    self._3366_aes[client_ip] = (
+                                    self._3366_prod_hex[account_scope] = _pid
+                                    self._3366_aes[account_scope] = (
                                         down_st.key,
                                         down_st.iv,
                                     )
@@ -1437,9 +1497,12 @@ class Socks5Server:
                                         client_ip,
                                         _pid,
                                         _meta.get("name") or _pid,
+                                        username,
                                     )
-                                    recording_pool.set_session_3366_key_ready(client_ip)
-                        kv = self._3366_aes.get(client_ip)
+                                    recording_pool.set_session_3366_key_ready(
+                                        client_ip, username
+                                    )
+                        kv = self._3366_aes.get(account_scope)
 
                         plain = None
                         if info and info.get("msg") == MSG_DATA:
@@ -1490,6 +1553,7 @@ class Socks5Server:
                                     recording_pool.append_from_3366_plain(
                                         client_ip, plain, items,
                                         conn_uid=self._3366_hs_uid.get(conn_id, ""),
+                                        proxy_username=username,
                                     )
                                     self._conn_carries_3366.add(conn_id)
                                 elif conn_id not in getattr(
@@ -1581,6 +1645,7 @@ class Socks5Server:
                                 direction,
                                 fr,
                                 product_label=prod if prod else None,
+                                proxy_username=username,
                             )
                         if prod and conn_id not in self._3366_prod_logged:
                             self._3366_prod_logged.add(conn_id)
@@ -1635,9 +1700,9 @@ class Socks5Server:
                         pass  # 33 重放/替换已全局禁用
                     elif mode == "replay" and direction == "↑UP":
                         # 暗区突围国服：33 只处理 40_13 内 01_0A_00_09/21。
-                        _prod_hex = (self._3366_prod_hex.get(client_ip) or "").upper()
+                        _prod_hex = (self._3366_prod_hex.get(account_scope) or "").upper()
                         _is_az_breakout_3366 = _prod_hex == "0000094E"
-                        kv = self._3366_aes.get(client_ip)
+                        kv = self._3366_aes.get(account_scope)
                         pools = self._replay_pools.get(conn_id)
                         ri33 = self._replay_index_33.get(conn_id)
                         # 3366 握手池未匹配（extract_handshake_user_id 失败或未找到）
@@ -1645,9 +1710,11 @@ class Socks5Server:
                         if kv and not pools:
                             _lazy_gid = (self._3366_hs_uid.get(conn_id)
                                          or self._conn_live_gid.get(conn_id)
-                                         or self._ip_game_uid.get(client_ip))
+                                         or self._ip_game_uid.get(account_scope))
                             if _lazy_gid:
-                                _lazy_pool = recording_pool.find_pool_by_game_id(str(_lazy_gid))
+                                _lazy_pool = recording_pool.find_pool_by_game_id(
+                                    str(_lazy_gid), username
+                                )
                                 if _lazy_pool:
                                     self._replay_pools[conn_id] = _lazy_pool
                                     self._replay_index_33[conn_id] = {
@@ -1882,10 +1949,10 @@ class Socks5Server:
                     _dl_active = bool(_dl_search)
                     if _dl_active and direction == "↓DOWN" and mode == "replay":
                         from core.dl_intercept import process_dl_intercept_3366
-                        kv_intercept = self._3366_aes.get(client_ip)
+                        kv_intercept = self._3366_aes.get(account_scope)
                         _game_uid = (self._3366_hs_uid.get(conn_id)
                                      or self._conn_live_gid.get(conn_id)
-                                     or self._ip_game_uid.get(client_ip, ""))
+                                     or self._ip_game_uid.get(account_scope, ""))
                         _proxy_user = username or ""
                         if _game_uid and _proxy_user and _game_uid != _proxy_user:
                             conn_label = f"{_game_uid}({_proxy_user})"

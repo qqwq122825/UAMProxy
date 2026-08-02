@@ -13,11 +13,12 @@ from PySide6.QtWidgets import (
     QHeaderView, QSplitter, QStatusBar, QDateEdit, QMessageBox,
     QDialog, QFormLayout, QDialogButtonBox, QAbstractItemView, QFileDialog,
     QComboBox, QFrame, QSizePolicy, QGridLayout,
+    QTreeWidget, QTreeWidgetItem,
 )
 from PySide6.QtCore import Qt, Signal, QObject, QDate, QTimer, QUrl
-from PySide6.QtGui import QColor, QFont, QTextCursor, QDesktopServices
+from PySide6.QtGui import QColor, QBrush, QFont, QTextCursor, QDesktopServices
 
-APP_VERSION = "v1.102"
+APP_VERSION = "v1.103"
 
 from core.config import app_config
 from core.ace_display import build_ace_identifier_lookup, ace_identifier_display
@@ -485,7 +486,7 @@ class MainWindow(QMainWindow):
         self._ip_replay_progress: dict[str, tuple] = {}        # ip → (current, total) 兼容
         self._ip_replay_progress_detail: dict[str, tuple] = {}  # ip → (cur01,total01,cur33,total33,cur09,total09,cur21,total21,cur01_fb)
         self._detail_dialogs:    dict[str, ConnDetailDialog] = {}  # ip → dialog
-        self._rec_sid_rows:      dict[str, int] = {}               # sid → 录制管理表行号
+        self._rec_sid_items:     dict[str, QTreeWidgetItem] = {}   # recording_id → 树节点
         # 下发拦截统计（按账户）
         self._dl_intercept_stats:   dict[str, dict] = {}           # label → {ul_hit, 01_drop, str_replace, chunk_drop, last_active}
         self._dl_intercept_detail_dialogs: dict[str, DlInterceptDetailDialog] = {}
@@ -865,22 +866,27 @@ class MainWindow(QMainWindow):
         _rec_hint.setStyleSheet("color:#8b949e;font-size:11px;padding:4px 0;")
         top_v.addWidget(_rec_hint)
 
-        self.rec_session_table = QTableWidget(0, 7)
-        self.rec_session_table.setHorizontalHeaderLabels(
-            ["游戏用户ID", "01数", "33数", "来源 IP", "最近录制", "状态", "操作"]
+        self.rec_session_table = QTreeWidget()
+        self.rec_session_table.setColumnCount(9)
+        self.rec_session_table.setHeaderLabels(
+            ["录制编号", "代理账号", "游戏用户ID", "01数", "33数",
+             "来源 IP", "最近录制", "状态", "操作"]
         )
-        sh = self.rec_session_table.horizontalHeader()
-        sh.setSectionResizeMode(0, QHeaderView.Stretch)   # 游戏用户ID 拉伸填满
+        sh = self.rec_session_table.header()
+        sh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         sh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        sh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        sh.setSectionResizeMode(2, QHeaderView.Stretch)   # 游戏用户ID 拉伸填满
         sh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         sh.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         sh.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         sh.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        sh.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        sh.setSectionResizeMode(8, QHeaderView.ResizeToContents)
         sh.setMinimumSectionSize(50)
         self.rec_session_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.rec_session_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.rec_session_table.verticalHeader().setVisible(False)
+        self.rec_session_table.setRootIsDecorated(True)
+        self.rec_session_table.setAlternatingRowColors(True)
         top_v.addWidget(self.rec_session_table)
         outer.addWidget(top_w)
 
@@ -2686,73 +2692,93 @@ class MainWindow(QMainWindow):
 
     # ─── 录制管理 Tab 槽 ─────────────────────
     def _on_record_updated(self):
-        """录制池结构变化时全量刷新会话列表（保留当前选中 游戏用户ID）"""
+        """按代理账号 → 录制会话 → TCP连接三层树刷新录制管理。"""
         sessions = recording_pool.get_all_sessions()
-        cur_row = self.rec_session_table.currentRow()
-        cur_game_id = ""
-        if cur_row >= 0:
-            it = self.rec_session_table.item(cur_row, 0)
-            if it:
-                cur_game_id = it.data(Qt.UserRole) or ""
+        current = self.rec_session_table.currentItem()
+        current_sid = current.data(0, Qt.UserRole) if current else ""
 
-        self.rec_session_table.setRowCount(0)
-        self._rec_game_id_rows: dict[str, int] = {}   # game_id → 行号，供轻量更新用
-        restore_row = -1
-        for i, s in enumerate(sessions):
-            self.rec_session_table.insertRow(i)
+        self.rec_session_table.clear()
+        self._rec_sid_items: dict[str, QTreeWidgetItem] = {}
+        owner_items: dict[str, QTreeWidgetItem] = {}
+        restore_item = None
+
+        for s in sessions:
+            owner = (s.get("proxy_username") or "default").strip()
+            parent = owner_items.get(owner)
+            if parent is None:
+                parent = QTreeWidgetItem(self.rec_session_table)
+                parent.setText(0, f"代理账号：{owner}")
+                parent.setText(7, "账号分组")
+                parent.setExpanded(True)
+                owner_items[owner] = parent
+
+            sid = s.get("sid") or s.get("recording_id") or ""
+            recording_id = s.get("recording_id") or sid
             gid = (s.get("game_id") or "").strip()
             gid_display = gid if gid else "—"
-            gid_item = QTableWidgetItem(gid_display)
-            gid_item.setTextAlignment(Qt.AlignCenter)
-            gid_item.setData(Qt.UserRole, gid)
-            gid_item.setToolTip(gid if gid.startswith("待识别-") else f"游戏用户ID: {gid}")
-
             n01 = int(s.get("count_01", 0) or 0)
             n3366 = int(s.get("count_3366", 0) or 0)
-            n01_item = QTableWidgetItem(str(n01))
-            n01_item.setTextAlignment(Qt.AlignCenter)
-            n3366_item = QTableWidgetItem(str(n3366))
-            n3366_item.setTextAlignment(Qt.AlignCenter)
-
             ips = s.get("ips", [])
             ip_txt = ", ".join(ips) if ips else "—"
-            ip_item = QTableWidgetItem(ip_txt)
-            ip_item.setTextAlignment(Qt.AlignCenter)
-
-            # 最近录制时间
             last_t = s.get("last_record_at", 0.0) or 0.0
-            if last_t > 0:
-                last_str = datetime.fromtimestamp(last_t).strftime("%m-%d %H:%M:%S")
-            else:
-                last_str = "—"
-            last_item = QTableWidgetItem(last_str)
-            last_item.setTextAlignment(Qt.AlignCenter)
-            if last_t > 0:
-                last_item.setToolTip(datetime.fromtimestamp(last_t).strftime("%Y-%m-%d %H:%M:%S"))
-
+            last_str = (
+                datetime.fromtimestamp(last_t).strftime("%m-%d %H:%M:%S")
+                if last_t > 0 else "—"
+            )
             status = "● 录制中" if s.get("active") else "○ 已停止"
-            st_item = QTableWidgetItem(status)
-            st_item.setTextAlignment(Qt.AlignCenter)
+            item = QTreeWidgetItem(parent)
+            item.setText(0, recording_id)
+            item.setData(0, Qt.UserRole, sid)
+            item.setText(1, owner)
+            item.setText(2, gid_display)
+            item.setToolTip(2, gid if gid.startswith("待识别-") else f"游戏用户ID: {gid}")
+            item.setText(3, str(n01))
+            item.setText(4, str(n3366))
+            item.setText(5, ip_txt)
+            item.setText(6, last_str)
+            item.setText(7, status)
+            for col in range(9):
+                item.setTextAlignment(col, Qt.AlignCenter)
+                if s.get("active"):
+                    item.setForeground(col, QBrush(QColor("#dc2626")))
 
-            if s.get("active"):
-                for item in (gid_item, n01_item, n3366_item, ip_item, last_item, st_item):
-                    item.setForeground(QColor("#ff6b6b"))
-
-            self.rec_session_table.setItem(i, 0, gid_item)
-            self.rec_session_table.setItem(i, 1, n01_item)
-            self.rec_session_table.setItem(i, 2, n3366_item)
-            self.rec_session_table.setItem(i, 3, ip_item)
-            self.rec_session_table.setItem(i, 4, last_item)
-            self.rec_session_table.setItem(i, 5, st_item)
-            # 详情按钮
             btn_detail = QPushButton("详情")
             btn_detail.setFixedSize(52, 22)
             btn_detail.setStyleSheet("font-size:11px; padding:0;")
-            btn_detail.clicked.connect(lambda _checked, g=gid, d=gid_display: self._on_rec_detail_btn(g, d))
-            self.rec_session_table.setCellWidget(i, 6, btn_detail)
-            self._rec_game_id_rows[gid] = i
-            if gid == cur_game_id:
-                restore_row = i
+            btn_detail.clicked.connect(
+                lambda _checked, s_id=sid, d=gid_display, o=owner:
+                self._on_rec_detail_btn(s_id, f"{o} / {d}")
+            )
+            self.rec_session_table.setItemWidget(item, 8, btn_detail)
+            self._rec_sid_items[sid] = item
+            if sid == current_sid:
+                restore_item = item
+
+            active_connections = set(s.get("connections") or [])
+            details = s.get("connection_details") or {}
+            for conn_id in s.get("connection_history") or []:
+                meta = details.get(conn_id) or {}
+                protocols = "/".join(meta.get("protocols") or []) or "待识别"
+                conn_item = QTreeWidgetItem(item)
+                conn_item.setText(0, conn_id)
+                conn_item.setText(2, f"连接：{protocols}")
+                conn_item.setText(5, meta.get("remote_endpoint") or "—")
+                conn_item.setText(
+                    7, "● 连接中" if conn_id in active_connections else "○ 已断开"
+                )
+                for col in range(9):
+                    conn_item.setForeground(col, QBrush(QColor("#64748b")))
+
+            parent.setText(3, str(int(parent.text(3) or "0") + n01))
+            parent.setText(4, str(int(parent.text(4) or "0") + n3366))
+            owner_has_active = (
+                s.get("active") or "有正在录制" in parent.text(7)
+            )
+            parent.setText(
+                7,
+                f"{parent.childCount()} 次录制"
+                + (" / 有正在录制" if owner_has_active else ""),
+            )
 
         if hasattr(self, "rec_summary_labels"):
             active_count = sum(1 for s in sessions if s.get("active"))
@@ -2768,48 +2794,37 @@ class MainWindow(QMainWindow):
             self.rec_summary_labels["templates01"].setText(f"01 模板: {total_01}")
             self.rec_summary_labels["templates33"].setText(f"33 模板: {total_33}")
 
-        if restore_row >= 0:
-            self.rec_session_table.selectRow(restore_row)
+        if restore_item is not None:
+            self.rec_session_table.setCurrentItem(restore_item)
 
     def _on_record_count(self, sid: str, count: int):
-        """轻量更新：按 sid 查找 game_id 后刷新对应行；找不到则全量刷新"""
-        gid = recording_pool.get_game_id_for_sid(sid)
-        if not gid:
+        """轻量更新指定 recording_id 的模板数和最近时间。"""
+        item = getattr(self, "_rec_sid_items", {}).get(sid)
+        if item is None:
             self._on_record_updated()
             return
-        row = getattr(self, "_rec_game_id_rows", {}).get(gid, -1)
-        if row < 0:
-            self._on_record_updated()
-            return
-        n01, n3366 = recording_pool.get_aggregated_counts_for_game_id(gid)
-        n01_item = self.rec_session_table.item(row, 1)
-        n3366_item = self.rec_session_table.item(row, 2)
-        if n01_item:
-            n01_item.setText(str(n01))
-        if n3366_item:
-            n3366_item.setText(str(n3366))
-        # 同步刷新最近录制时间（列4）
-        last_t = recording_pool.get_last_record_at_for_game_id(gid)
-        last_item = self.rec_session_table.item(row, 4)
-        if last_item:
-            if last_t > 0:
-                last_item.setText(datetime.fromtimestamp(last_t).strftime("%m-%d %H:%M:%S"))
-                last_item.setToolTip(datetime.fromtimestamp(last_t).strftime("%Y-%m-%d %H:%M:%S"))
-            else:
-                last_item.setText("—")
+        n01, n3366 = recording_pool.get_counts_for_sid(sid)
+        item.setText(3, str(n01))
+        item.setText(4, str(n3366))
+        last_t = recording_pool.get_last_record_at_for_sid(sid)
+        item.setText(
+            6,
+            datetime.fromtimestamp(last_t).strftime("%m-%d %H:%M:%S")
+            if last_t > 0 else "—",
+        )
 
-    def _on_rec_detail_btn(self, game_id: str, display: str):
-        """点击"详情"按钮：展开底部面板并加载对应游戏ID的加密区数据"""
-        if not game_id:
+    def _on_rec_detail_btn(self, sid: str, display: str):
+        """点击"详情"按钮：展开并加载单次录制的加密区数据。"""
+        if not sid:
             return
         # 展开底部详情区
         self._rec_outer_splitter.setSizes([180, 340])
         self.lbl_rec_detail_title.setText(f"加密区详情 — {display}")
-        self._load_rec_detail(game_id)
+        self._load_rec_detail(sid)
 
-    def _load_rec_detail(self, game_id: str):
-        """加载指定 game_id 的加密区列表到底部面板"""
-        rows = recording_pool.get_pool_item_rows_by_game_id(game_id)
+    def _load_rec_detail(self, sid: str):
+        """加载指定 recording_id 的加密区列表。"""
+        rows = recording_pool.get_pool_item_rows(sid)
         self._rec_current_rows = rows or []
         self._rec_current_pkts = [r["payload"] for r in rows]
         self.rec_pkt_table.setRowCount(0)
