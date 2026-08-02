@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QObject, QDate, QTimer, QUrl
 from PySide6.QtGui import QColor, QBrush, QFont, QTextCursor, QDesktopServices
 
-APP_VERSION = "v1.103"
+APP_VERSION = "v1.104"
 
 from core.config import app_config
 from core.ace_display import build_ace_identifier_lookup, ace_identifier_display
@@ -27,6 +27,7 @@ from core.managers import user_manager, local_map_manager
 from core.pool import recording_pool
 from core.server import engine, _check_external_proxy
 from core.special_capture import special_capture_manager
+from core.traffic_session_log import TrafficSessionLog
 
 # 录制池「前16字节」列说明：仅记录 01 0A 00 09/21 块，以 01 0A 00 09 或 0A 00 09 开头
 _REC_ANCHOR_TOOLTIP = {
@@ -605,6 +606,13 @@ class MainWindow(QMainWindow):
         bar0 = QHBoxLayout()
         bar0.addWidget(QLabel("事件日志（用户登录/会话统计/代理状态）"))
         bar0.addStretch()
+        self.btn_open_log_dir = QPushButton("📂 打开日志目录")
+        self.btn_open_log_dir.setFixedWidth(125)
+        self.btn_open_log_dir.setToolTip(
+            "优先打开当前专项采集目录，其次打开当前常规流量详单目录"
+        )
+        self.btn_open_log_dir.clicked.connect(self._open_log_directory)
+        bar0.addWidget(self.btn_open_log_dir)
         b_clr0 = QPushButton("清空"); b_clr0.setFixedWidth(50)
         b_clr0.clicked.connect(self.log_view.clear)
         bar0.addWidget(b_clr0)
@@ -2338,6 +2346,50 @@ class MainWindow(QMainWindow):
                 self.user_table.setItem(row, col, item)
 
     # ─── 事件日志（业务级）──────────────────
+    def _resolve_log_directory(self) -> tuple[str, str]:
+        """选择最适合用户直接查看的日志目录。"""
+        capture_root = special_capture_manager.root_path
+        if capture_root and os.path.isdir(capture_root):
+            return os.path.abspath(capture_root), "当前专项采集"
+
+        archive = special_capture_manager.last_archive_path
+        if archive:
+            capture_dir = archive[:-4] if archive.lower().endswith(".zip") else archive
+            if os.path.isdir(capture_dir):
+                return os.path.abspath(capture_dir), "最近专项采集"
+
+        regular = TrafficSessionLog.current_log_dir()
+        if regular:
+            return regular, "当前流量详单"
+
+        base = os.path.abspath(os.getcwd())
+        candidates: list[str] = []
+        try:
+            for name in os.listdir(base):
+                if not (
+                    name.startswith("PyProxyTrafficLogs_")
+                    or name.startswith("capture-clean-")
+                ):
+                    continue
+                path = os.path.join(base, name)
+                if os.path.isdir(path):
+                    candidates.append(path)
+        except OSError:
+            pass
+        if candidates:
+            latest = max(candidates, key=lambda path: os.path.getmtime(path))
+            return latest, "最近日志"
+        return base, "程序目录（尚未生成日志）"
+
+    def _open_log_directory(self):
+        path, label = self._resolve_log_directory()
+        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        if opened:
+            self.lbl_status.setText(f"已打开{label}: {path}")
+            self._on_event_log("INFO", "UI", f"已打开{label}: {path}")
+        else:
+            QMessageBox.warning(self, "打开日志目录", f"目录打开失败：\n{path}")
+
     def _on_event_log(self, level: str, tag: str, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
         colors = {

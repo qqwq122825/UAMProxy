@@ -61,8 +61,12 @@ python build_slim.py
 
 发布版本由 `ui/views.py` 的 `APP_VERSION` 明确维护，打包脚本不再自动
 对版本号 `+1`。产物名包含版本和 Git 提交，例如
-`UAMProxy_v1.103_COMMIT.exe`；同时生成 `.build.json`，其中包含打包时间和
+`UAMProxy_v1.104_COMMIT.exe`；同时生成 `.build.json`，其中包含打包时间和
 EXE SHA256。窗口标题也会显示同一 Git 提交号。
+
+事件日志工具栏提供“打开日志目录”快捷按钮：专项采集进行中优先打开
+`capture-clean-*`，否则打开当前 `PyProxyTrafficLogs_*`；当前无会话时
+会选择最近的日志目录。
 
 录制管理采用可展开树：顶层是代理账号，第二层是单次录制编号，第三层是该次
 录制包含的 TCP 连接及其目标地址、01/3366 协议识别和连接状态。录制导入导出

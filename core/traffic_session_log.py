@@ -100,6 +100,14 @@ class TrafficSessionLog:
         return cls._ensure_dir()
 
     @classmethod
+    def current_log_dir(cls) -> str | None:
+        """返回本进程已创建的常规流量详单目录，不因查询而新建目录。"""
+        with cls._lock:
+            if cls._dir and os.path.isdir(cls._dir):
+                return os.path.abspath(cls._dir)
+            return None
+
+    @classmethod
     def min_len(cls) -> int:
         try:
             return max(0, int(app_config.get("traffic_log_min_len", 10)))
