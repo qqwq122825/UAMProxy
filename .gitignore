@@ -29,7 +29,7 @@ PyProxyTrafficLogs_*/
 # 本地杂项，不进仓库
 .DS_Store
 3366协议调试/
-C:\PyProxyApp/
+C\:\\PyProxyApp/
 __pycache__/
 叶子裁剪测试/
 数据/
