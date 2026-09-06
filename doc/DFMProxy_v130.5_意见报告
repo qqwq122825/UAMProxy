@@ -1,0 +1,199 @@
+# DFMProxy v1.130.5 意见报告
+
+## 一、审核对象
+
+- 项目：`/Users/xxx/Documents/aceProxy/DFMProxy`
+- 版本：`v1.130.5`
+- 提交：`feedb0b`
+- 对照报告：`/Users/xxx/Documents/aceProxy/DFMProxy/doc/DFMProxy_v130.5_开机域时钟改动审核报告_20260826.md`
+- 审核日期：2026-08-26
+
+## 二、综合结论
+
+### 条件通过
+
+v1.130.5 的核心修改方向正确：
+
+- `8024[+0x20/+0x24]` 保留录制值；
+- `802C[+0x20]` 按 `recorded_at` 与当前时间差推进；
+- `802C[+0x24/+0x28]` 延续四步链；
+- 重连时不再按照本次 01 连接重新构造 `8024`；
+- 现有回归测试全部通过。
+
+当前版本适合以下范围：同设备、录制后设备未重启、时间元数据完整、代理机与设备墙钟基本一致。
+
+如果需要覆盖设备重启、设备时钟调整、时钟不同步、历史旧池缺少时间字段等场景，仍需补充实现和测试。
+
+## 三、已验证内容
+
+执行：
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+结果：
+
+```text
+Ran 248 tests
+OK
+skipped=21
+```
+
+同时确认：
+
+- `/Users/xxx/Documents/aceProxy/DFMProxy/core/type9_v128_replenish.py` 已移除 `virtual_epoch` 逻辑；
+- `8024` 正文不会被 `rebuild_player_supplement_leaf` 改写；
+- `802C[+0x20]` 使用 `recorded_at` 推进；
+- `recorded_at` 和 `recorded_elapsed_seconds` 已在 `/Users/xxx/Documents/aceProxy/DFMProxy/core/pool.py` 与 `/Users/xxx/Documents/aceProxy/DFMProxy/core/crypto.py` 中传递；
+- 版本号、模型 revision、UI 版本断言均已更新。
+
+## 四、主要问题与建议
+
+### P1：设备时钟和代理机时钟没有完全对齐
+
+当前实现最终使用的时间来源主要是代理机 `time.time()`：
+
+- `/Users/xxx/Documents/aceProxy/DFMProxy/core/crypto.py:1907-1915`
+- `/Users/xxx/Documents/aceProxy/DFMProxy/core/server.py:2414`
+- `/Users/xxx/Documents/aceProxy/DFMProxy/core/server.py:2434`
+
+报告中的原生证据说明，`802C[+0x20]` 跟随的是设备墙钟。代理机与设备存在时差，或设备调整系统时间时，重放结果可能出现偏差。
+
+建议优先从 Live 数据推导设备时间：
+
+```text
+device_now = live_8024[+0x20] + live_802C[+0x20]
+```
+
+有 Live 锚点时使用设备时间；缺少 Live 锚点时再使用代理机时间，并在日志中标明时间来源。
+
+### P1：历史池缺少时间元数据时，802C 行为不完整
+
+`_replay_recorded_at` 位于 `/Users/xxx/Documents/aceProxy/DFMProxy/core/type9_v128_replenish.py:377-394`，行为如下：
+
+| 元数据情况 | 802C 行为 |
+|---|---|
+| 有 `recorded_at` | 按绝对时间推进 |
+| 只有 `recorded_elapsed_seconds` | 按当前连接起点近似推进 |
+| 两者都缺少 | `802C[+0x20]` 保留录制值，表现为冻结 |
+
+建议：
+
+1. 增加两字段同时缺失的测试；
+2. 在日志中增加 `CLOCK_METADATA_MISSING`；
+3. UI 显示动态时间字段的元数据状态；
+4. 缺少时间元数据的模板不标记为“动态就绪”。
+
+### P2：显式使用 `None` 判断
+
+位置：`/Users/xxx/Documents/aceProxy/DFMProxy/core/type9_v128_replenish.py:430`。
+
+当前写法：
+
+```python
+if recorded_at:
+```
+
+建议改为：
+
+```python
+if recorded_at is not None:
+```
+
+这样可以区分时间字段缺失和时间字段值为 0。
+
+### P1：设备重启后的开机域仍属于已知缺口
+
+当前重放使用录制中的 `8024[+0x20]` 和 `8024[+0x24]`。真实设备重启后，新的开机 epoch 不会自动进入重放状态。
+
+如果产品范围包括设备重启后的重放，建议：
+
+1. 对比 Live `8024[+0x20]` 与模板值；
+2. 检测开机域变化；
+3. 检测到新开机域后暂停旧玩家动态叶；
+4. 选择同一开机域的新模板。
+
+当前不建议重新引入虚拟 `8024` 模拟新开机。若产品明确限定“录制后设备不得重启”，应在 README、UI 和发布说明中强化该限制。
+
+### P2：mid-session 模板的 802C 首包链存在边界问题
+
+当模板不是连接首包时，录制数据中的 802C 链可能已经是 `previous != 0`。当前在缺少 Live 802C 锚点时保留录制链，位置为：
+
+`/Users/xxx/Documents/aceProxy/DFMProxy/core/type9_v128_replenish.py:437-444`
+
+建议记录模板是否包含连接首个 802C；没有首包链锚点时降低模板动态等级，或在模板选择阶段排除该类模板。
+
+## 五、文档问题
+
+### 1. `CURRENT_STATE.md` 内容过期
+
+以下内容仍指向旧版本：
+
+- `/Users/xxx/Documents/aceProxy/DFMProxy/CURRENT_STATE.md:5` 仍写 `master / 5f2f1f2`；
+- `/Users/xxx/Documents/aceProxy/DFMProxy/CURRENT_STATE.md:234` 仍写当前发布 tag 为 `v1.130.2`。
+
+建议更新为：
+
+```text
+发布基线：v1.130.5
+当前分支/HEAD：master / feedb0b
+模型 revision：v130.5-player-boot-epoch-r5
+```
+
+第 12 节“当前工作区待提交内容”也应同步重写。
+
+### 2. 802C 目录命名不够准确
+
+`/Users/xxx/Documents/aceProxy/DFMProxy/core/dfm_message_catalog.py:68` 当前文案为“自开机累计秒”，容易被理解为纯 `systemUptime`。建议改为：
+
+```text
+设备墙钟相对开机 epoch 的秒数
+```
+
+### 3. 审核报告当前未纳入 Git
+
+当前 Git 状态显示：
+
+```text
+?? doc/DFMProxy_v130.5_开机域时钟改动审核报告_20260826.md
+```
+
+如果该报告作为正式发布审核凭证，建议单独提交；如果仅作为本地审阅材料，建议在文件头标注“本地审核稿”。
+
+## 六、建议增加的测试
+
+1. `recorded_at` 和 `recorded_elapsed_seconds` 同时缺失；
+2. `recorded_at=0`；
+3. 代理机与设备墙钟存在偏差；
+4. 设备墙钟向前调整；
+5. 设备墙钟向后调整；
+6. 设备重启后 Live 8024 变化；
+7. mid-session 模板的 802C 链；
+8. 真实 server 调用路径下 `session_unix_time=None`；
+9. 周期外推情况下 8024/802C 同时生成；
+10. 多个 802C 叶子连续发送时的链计数。
+
+## 七、最终意见
+
+### 可以保留
+
+- 取消虚拟 `8024` 的方向正确；
+- 8024 保留录制值符合现有原生证据；
+- 802C 使用绝对录制时间推进，比按连接 elapsed 重置更合理；
+- 802C 四步链逻辑与上一版本兼容；
+- 当前回归测试结果良好。
+
+### 发布前建议完成
+
+1. 明确并处理设备时间与代理机时间的差异；
+2. 补充两个时间字段都缺失时的行为；
+3. 将 `if recorded_at` 改为 `if recorded_at is not None`；
+4. 更新 `CURRENT_STATE.md`；
+5. 修正 802C 目录文案；
+6. 在发布说明中明确设备重启后的开机域暂未覆盖；
+7. 增加设备时钟变化和 mid-session 模板测试。
+
+**最终评级：条件通过。**
+
+在“同设备、录制后未重启、时间元数据完整”的范围内，v1.130.5 可以作为当前版本使用；完成上述边界处理和文档同步后，再作为完整稳定版本推广。

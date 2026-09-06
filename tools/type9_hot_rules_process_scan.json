@@ -1,0 +1,86 @@
+{
+  "schema": "dfm-type9-hot-rules-v1",
+  "revision": "v127.0-sequence-safe-empty-2000-1",
+  "rules": [
+    {
+      "id": "0207-zero-anomaly-counters",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x0207",
+        "length": 116
+      },
+      "action": "patch_live",
+      "patches": [
+        {
+          "offset": "0x48",
+          "hex": "00000000",
+          "note": "body+0x28"
+        },
+        {
+          "offset": "0x50",
+          "hex": "00000000",
+          "note": "body+0x30"
+        }
+      ],
+      "description": "疑似异常页/缺页计数：保留Live，仅清零两个已确认计数字段"
+    },
+    {
+      "id": "2000-clean-module-report",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x2000",
+        "length": "*"
+      },
+      "action": "replace_template_nearest",
+      "description": "周期模块检测结果：使用最近长度干净模板；无模板时改成真实44字节空结果0x2000并保留Live序号",
+      "no_template": "empty_2000"
+    },
+    {
+      "id": "1105-clean-module-enumeration",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x1105",
+        "length": "*"
+      },
+      "action": "replace_template_nearest",
+      "inherit_live_header": 36,
+      "description": "周期模块/路径枚举：继承Live前36字节并使用最近长度干净模板"
+    },
+    {
+      "id": "8027-clean-process-profile",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x8027",
+        "length": "*"
+      },
+      "action": "replace_template_nearest",
+      "description": "活动进程/应用枚举：使用最近长度干净模板"
+    },
+    {
+      "id": "8029-clean-process-location-profile",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x8029",
+        "length": "*"
+      },
+      "action": "replace_template_nearest",
+      "description": "进程调用位置、模块/符号/偏移枚举：使用最近长度干净模板"
+    },
+    {
+      "id": "9000-clean-installed-target-profile",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x9000",
+        "length": "*"
+      },
+      "action": "empty_2000",
+      "description": "命中型安装应用/环境目标项：改成真实44字节空结果0x2000并保留Live序号"
+    }
+  ]
+}

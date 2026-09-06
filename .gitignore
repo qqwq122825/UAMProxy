@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# 构建输出
+build/
+dist/
+*.egg-info/
+
+# 配置文件（可能含敏感信息）
+config.json
+
+# 日志与临时文件
+*.log
+PyProxyTrafficLogs_*/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 本地杂项，不进仓库
+.DS_Store
+3366协议调试/
+C:\PyProxyApp/
+__pycache__/
+叶子裁剪测试/
+数据/

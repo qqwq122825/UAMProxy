@@ -1,0 +1,158 @@
+{
+  "schema": "dfm-type9-hot-rules-v1",
+  "revision": "v128.2-0207-4850-compact-ai-log-1",
+  "rules": [
+    {
+      "id": "0207-zero-anomaly-counters",
+      "description": "疑似异常页/缺页状态：保留完整Live叶，仅清零+0x48与+0x50字段",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x0207",
+        "length": 116
+      },
+      "action": "patch_live",
+      "patches": [
+        {
+          "offset": "0x48",
+          "hex": "00000000",
+          "note": "body+0x28"
+        },
+        {
+          "offset": "0x50",
+          "hex": "00000000",
+          "note": "body+0x30"
+        }
+      ]
+    },
+    {
+      "id": "2001-zero-behavior-vector",
+      "description": "固定步进状态：保留前0x24字节及步进计数，清零后部20字节行为向量",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x2001",
+        "length": 56
+      },
+      "action": "patch_live",
+      "patches": [
+        {
+          "offset": "0x24",
+          "hex": "0000000000000000000000000000000000000000",
+          "note": "清零count后方四个浮点/行为向量字段"
+        }
+      ]
+    },
+    {
+      "id": "8028-zero-write-counter",
+      "description": "80xx小型状态：保留+0x20的7，仅清零开追踪后跳变的+0x24累计",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x8028",
+        "length": 40
+      },
+      "action": "patch_live",
+      "patches": [
+        {
+          "offset": "0x24",
+          "hex": "00000000",
+          "note": "开追踪后跳变的累计，干净样本为0"
+        }
+      ]
+    },
+    {
+      "id": "8002-zero-status-word",
+      "description": "80xx状态叶：仅清零开追踪后从0变成3的+0x2C，其余字段保留Live",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x8002",
+        "length": 56
+      },
+      "action": "patch_live",
+      "patches": [
+        {
+          "offset": "0x2C",
+          "hex": "00000000",
+          "note": "开追踪后0→3的状态字"
+        }
+      ]
+    },
+    {
+      "id": "100B-clean-uikit-view-tree",
+      "description": "UIKit视图层级摘要：注入dylib会多一层绘制视图。有对应录制叶则无条件用最近长度模板替换，允许跨设备；没有对应叶则原样通过",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x100B",
+        "length": "*"
+      },
+      "action": "replace_template_nearest",
+      "inherit_live_header": 14,
+      "allow_cross_device": true
+    },
+    {
+      "id": "2000-clean-module-report",
+      "description": "周期模块检测结果：有模板则最近长度替换；无模板则改成真实44字节空结果0x2000并保留Live序号",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x2000",
+        "length": "*"
+      },
+      "action": "replace_template_nearest",
+      "inherit_live_header": 14,
+      "no_template": "empty_2000"
+    },
+    {
+      "id": "1105-clean-module-enumeration",
+      "description": "周期模块/路径枚举：有对应录制叶则用最近长度模板替换0x24后主体，保留Live前36字节（头+计数）；没有对应叶则原样通过",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x1105",
+        "length": "*"
+      },
+      "action": "replace_template_nearest",
+      "inherit_live_header": 36
+    },
+    {
+      "id": "8027-clean-process-profile",
+      "description": "活动进程/应用枚举：黑名单脏进程先删叶；有玩家录制或官方模板则按最近长度替换并保留Live公共头；没有对应叶则原样通过",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x8027",
+        "length": "*"
+      },
+      "action": "replace_template_nearest",
+      "inherit_live_header": 14,
+      "allow_cross_device": true
+    },
+    {
+      "id": "8029-clean-process-location-profile",
+      "description": "进程调用位置采样：黑名单脏进程先删叶；有玩家录制或官方模板则按最近长度替换并保留Live公共头；没有对应叶则原样通过",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x8029",
+        "length": "*"
+      },
+      "action": "replace_template_nearest",
+      "inherit_live_header": 14,
+      "allow_cross_device": true
+    },
+    {
+      "id": "9000-clean-installed-target-profile",
+      "description": "命中型安装应用/环境目标项：改成真实44字节空结果0x2000，保留Live序号",
+      "enabled": true,
+      "match": {
+        "record_code": "0x0102000A",
+        "message_id": "0x9000",
+        "length": "*"
+      },
+      "action": "empty_2000"
+    }
+  ]
+}
