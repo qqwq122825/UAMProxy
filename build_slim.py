@@ -303,7 +303,7 @@ def main():
     new_ver = bump_version()
     # 版本号中 "v1.2" → 文件名用 "v1.2"，去掉不合法字符
     ver_tag  = new_ver.replace(" ", "_")
-    exe_name = f"{APP_NAME}_{ver_tag}"   # e.g. UAMProxy_v1.131.1
+    exe_name = f"{APP_NAME}_{ver_tag}"   # e.g. UAMProxy_v1.131.2
 
     print("=" * 55)
     print(f"  UAMProxy 暗区突围专项精简打包 (Slim Build)  {new_ver}")

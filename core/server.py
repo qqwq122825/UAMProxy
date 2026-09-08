@@ -2588,9 +2588,8 @@ class Socks5Server:
                     io = app_config.get("3366_iv_offset")
                     k_off = ko if isinstance(ko, int) else None
                     iv_off = io if isinstance(io, int) else None
-                    reg = (
-                        merge_3366_product_registry(app_config.get("3366_products"))
-                        if LEGACY_GAME_RUNTIME_ENABLED else {}
+                    reg = merge_3366_product_registry(
+                        app_config.get("3366_products")
                     )
                     need_downlink_key_extract = registry_needs_downlink_key_extraction(
                         reg
@@ -2621,14 +2620,12 @@ class Socks5Server:
                         if direction == "↑UP":
                             # 10 01 总长：75=暗区国服通道；206=三角洲启发式（二者不同，勿混用）
                             if info and info.get("msg") == MSG_HANDSHAKE:
-                                if (
-                                    LEGACY_GAME_RUNTIME_ENABLED
-                                    and len(fr) == HS_LEN_AB_BREAKOUT_CN_1001
-                                ):
+                                if len(fr) == HS_LEN_AB_BREAKOUT_CN_1001:
                                     plugin_key_store.clear_game_hint(client_ip)
                                     self._3366_ab_cn_first_hs.add(client_ip)
                                 elif (
-                                    len(fr) == HS_LEN_DZ_HEURISTIC_1001
+                                    LEGACY_GAME_RUNTIME_ENABLED
+                                    and len(fr) == HS_LEN_DZ_HEURISTIC_1001
                                     and client_ip not in self._3366_ab_cn_first_hs
                                 ):
                                     plugin_key_store.set_game_hint(client_ip, "0a92")
@@ -2944,6 +2941,8 @@ class Socks5Server:
                                     cipher_bytes=fr,
                                     plain_bytes=_plain_for_log,
                                     username=username,
+                                    uid=_conn_uid,
+                                    mode=mode,
                                 )
                         except Exception:
                             pass

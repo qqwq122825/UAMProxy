@@ -25,7 +25,7 @@ GROUP_SCHEMA = "dfm-ai-01-group-v1"
 LEAF_SCHEMA = "dfm-ai-01-leaf-v1"
 CONTROL_EVENT_SCHEMA = "dfm-ai-control-event-v129-v1"
 CONTROL_AUDIT_REVISION = "v129-operation-state-audit-r1"
-APP_RELEASE_VERSION = "v1.131.0"
+APP_RELEASE_VERSION = "v1.131.2"
 
 
 def _now() -> tuple[str, int]:
@@ -57,6 +57,7 @@ class V128AiLog:
         # 详细01诊断专用：分别保留socket原始TCP请求块，以及TCP重组并按
         # 01长度字段切出的完整物理帧，避免AI从嵌套packet字段二次提取。
         "raw_tcp_requests": "raw_tcp_requests.jsonl",
+        "record_3366_frames": "record_3366_frames.jsonl",
         "record_01_slices": "record_01_slices.jsonl",
         "record_reports": "record_reports.jsonl",
         "record_leaves": "record_leaves.jsonl",
@@ -331,6 +332,7 @@ class V128AiLog:
                     "replay_leaves": LEAF_SCHEMA,
                     "record_frames": "dfm-ai-01-record-frame-v1",
                     "raw_tcp_requests": "dfm-ai-raw-tcp-request-v1",
+                    "record_3366_frames": "dfm-ai-3366-frame-v1",
                     "record_01_slices": "dfm-ai-01-physical-slice-v1",
                     "record_reports": "dfm-ai-01-record-report-v1",
                     "record_leaves": "dfm-ai-01-record-leaf-v1",
@@ -1049,6 +1051,129 @@ class V128AiLog:
                     "log_profile": "full",
                 },
             )
+
+    def write_3366_frame(
+        self,
+        *,
+        data_dir: str,
+        config,
+        conn_id: str,
+        direction: str,
+        client_ip: str,
+        uid: str,
+        mode: str,
+        frame: bytes,
+        plaintext: bytes | None,
+        username: str,
+        message_type_hex: str | None = None,
+        sequence: int | None = None,
+    ) -> str | None:
+        """记录一条完整3366帧：原始整帧、4013密文、解密后明文。"""
+        with self._lock:
+            raw = bytes(frame or b"")
+            if not raw:
+                return None
+            self.ensure_run(data_dir, config)
+            time_iso, time_unix_ms = _now()
+            profile = self._profile(config, username)
+            msg_hex = (
+                str(message_type_hex or "").upper()
+                or (raw[6:8].hex().upper() if len(raw) >= 8 else None)
+            )
+            ciphertext = None
+            decrypt_status = "not_encrypted"
+            if msg_hex == "4013":
+                decrypt_status = "key_unavailable"
+                if len(raw) >= 25:
+                    enc_len = int.from_bytes(raw[19:21], "big")
+                    if enc_len <= 0 or enc_len % 16 or 25 + enc_len > len(raw):
+                        decrypt_status = "ciphertext_layout_invalid"
+                    else:
+                        ciphertext = raw[25:25 + enc_len]
+                if plaintext:
+                    decrypt_status = "success"
+
+            plain = bytes(plaintext) if plaintext else None
+            reasons: list[str] = []
+            if decrypt_status in (
+                "failed",
+                "ciphertext_layout_invalid",
+            ):
+                reasons.append(f"3366:{decrypt_status}")
+            if plain and (
+                b"\x01\x0A\x00\x09" in plain or b"\x01\x0A\x00\x23" in plain
+            ):
+                reasons.append("3366:plaintext_contains_01_marker")
+            periodic = (
+                profile == "compact"
+                and self._periodic_due(config, username, "3366_frame")
+            )
+            full_capture = bool(profile == "full" or periodic or reasons)
+            event_id = self.next_id("record_3366_frame")
+            path = self.append(
+                "record_3366_frames",
+                {
+                    "schema": "dfm-ai-3366-frame-v1",
+                    "run_id": self.run_id,
+                    "event_id": event_id,
+                    "time": time_iso,
+                    "time_unix_ms": time_unix_ms,
+                    "capture_stage": "post_3366_magic_split",
+                    "direction": direction or None,
+                    "client_ip": client_ip or None,
+                    "connection_id": conn_id or None,
+                    "game_id": uid or None,
+                    "proxy_mode": mode or None,
+                    "proxy_username": username or None,
+                    "message_type_hex": msg_hex,
+                    "sequence": sequence,
+                    "frame_length": len(raw),
+                    "raw_frame_hex": raw.hex().upper() if full_capture else None,
+                    "raw_frame_sha256": hashlib.sha256(raw).hexdigest(),
+                    "ciphertext_length": len(ciphertext) if ciphertext else None,
+                    "ciphertext_hex": (
+                        ciphertext.hex().upper()
+                        if ciphertext is not None and full_capture
+                        else None
+                    ),
+                    "ciphertext_sha256": (
+                        hashlib.sha256(ciphertext).hexdigest()
+                        if ciphertext is not None
+                        else None
+                    ),
+                    "decrypt_status": decrypt_status,
+                    "plaintext_length": len(plain) if plain else None,
+                    "plaintext_hex": (
+                        plain.hex().upper() if plain is not None and full_capture else None
+                    ),
+                    "plaintext_sha256": (
+                        hashlib.sha256(plain).hexdigest() if plain is not None else None
+                    ),
+                    "contains_01_0a_00_09": bool(
+                        plain and b"\x01\x0A\x00\x09" in plain
+                    ),
+                    "log_profile": profile,
+                    "periodic_full_sample": periodic,
+                    "full_capture": full_capture,
+                    "full_capture_reasons": list(dict.fromkeys(reasons)),
+                },
+            )
+            if reasons:
+                self._append_anomaly(
+                    source_kind="3366_frame",
+                    event_id=event_id,
+                    username=username,
+                    client_ip=client_ip,
+                    conn_id=conn_id,
+                    game_id=uid,
+                    reasons=reasons,
+                    capture={
+                        "message_type_hex": msg_hex,
+                        "decrypt_status": decrypt_status,
+                        "raw_frame_hex": raw.hex().upper() if full_capture else None,
+                    },
+                )
+            return path
 
     def write_record_frame(
         self,

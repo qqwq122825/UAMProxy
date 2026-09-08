@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from core.edition import DFM_3366_PASSTHROUGH_ONLY
 from core.protocol_3366 import Conn3366State, feed_3366_stream
 
 
@@ -27,6 +28,9 @@ class Dfm3366PassthroughTests(unittest.TestCase):
         self.assertIsNone(state.iv)
         self.assertIsNone(state.product_name)
         self.assertIsNone(state.product_hex)
+
+    def test_uam_edition_decrypts_3366(self):
+        self.assertFalse(DFM_3366_PASSTHROUGH_ONLY)
 
 
 if __name__ == "__main__":

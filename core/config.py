@@ -68,7 +68,13 @@ class AppConfig:
         # 33 66 游戏产品（4 字节 ID 的 8 位 hex，如 00 00 09 4E → 0000094E）
         # decrypt: 当前仅实现 "aes_cbc_4013"（40 13 载荷）；null / 省略 则只识别不解密，避免误用暗区算法
         # 01 / 3366 产品识别默认走暗区国服；三角洲 plugin_games/0a92 仍保留源码。
-        "3366_products": {},
+        "3366_products": {
+            "0000094E": {
+                "name": "暗区突围国服",
+                "decrypt": "aes_cbc_4013",
+                "needs_downlink_key": True,
+            },
+        },
         # 远程用户管理（浏览器）
         # 注意：开启后建议在防火墙限制来源 IP，并妥善保管 token
         "admin_enabled": True,
@@ -125,7 +131,7 @@ class AppConfig:
         "rebuild_player_8023_enabled": False,
         "rebuild_player_8024_enabled": False,
         "rebuild_player_802C_enabled": False,
-        "rebuild_central9_enabled": True,
+        "rebuild_central9_enabled": False,
         "rebuild_player_base_enabled": False,
         "rebuild_match_events_enabled": False,
         "rebuild_scan_waves_enabled": False,

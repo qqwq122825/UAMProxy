@@ -56,7 +56,7 @@ class FullRebuildConfigTests(unittest.TestCase):
             config = AppConfig(str(Path(temp_dir) / "config.json"))
             self.assertFalse(config.get("rebuild_controls_v2"))
             self.assertFalse(config.get("rebuild_controls_v3"))
-            self.assertTrue(config.get("rebuild_central9_enabled"))
+            self.assertFalse(config.get("rebuild_central9_enabled"))
             self.assertTrue(config.get("rebuild_strong_profile"))
             self.assertFalse(config.get("rebuild_player_base_enabled"))
             self.assertFalse(config.get("rebuild_match_events_enabled"))

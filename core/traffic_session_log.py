@@ -2324,6 +2324,25 @@ class TrafficSessionLog:
         33_uplink.log — 33 上行帧（录制 / 重放两侧均记录）。
         记录：原始密文 hex、解密明文 hex、明文 ASCII 显示。
         """
+        if cls.ai_machine_enabled():
+            if cls._ai_allow(username):
+                try:
+                    ai_log_v128.write_3366_frame(
+                        data_dir=DATA_DIR,
+                        config=app_config,
+                        conn_id=conn_id,
+                        direction="↑UP",
+                        client_ip=client_ip,
+                        uid=uid,
+                        mode=mode,
+                        frame=cipher_bytes,
+                        plaintext=plain_bytes,
+                        username=username,
+                    )
+                except (OSError, TypeError, ValueError):
+                    pass
+            if not cls.enabled():
+                return
         if not cls._allow(username):
             return
         ts = datetime.now().isoformat(timespec="milliseconds")
@@ -2401,11 +2420,32 @@ class TrafficSessionLog:
         cipher_bytes: bytes,
         plain_bytes: bytes | None,
         username: str = "",
+        uid: str = "",
+        mode: str = "",
     ) -> None:
         """
         33_downlink.log — 33 下行帧（所有帧均记录，无论能否解密）。
         记录前 64B 原始密文 hex（便于在 tcp_raw.log 中定位）+ 明文中的可打印字符串。
         """
+        if cls.ai_machine_enabled():
+            if cls._ai_allow(username):
+                try:
+                    ai_log_v128.write_3366_frame(
+                        data_dir=DATA_DIR,
+                        config=app_config,
+                        conn_id=conn_id,
+                        direction="↓DOWN",
+                        client_ip=client_ip,
+                        uid=uid,
+                        mode=mode,
+                        frame=cipher_bytes,
+                        plaintext=plain_bytes,
+                        username=username,
+                    )
+                except (OSError, TypeError, ValueError):
+                    pass
+            if not cls.enabled():
+                return
         if not cls._allow(username):
             return
         ts = datetime.now().isoformat(timespec="milliseconds")

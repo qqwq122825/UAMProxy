@@ -1810,7 +1810,7 @@ def _ace_try_replay_template(
     )
     if rebuild_controls_v3:
         central9_replenish_enabled = bool(
-            v128_enabled and app_config.get("rebuild_central9_enabled", True)
+            v128_enabled and app_config.get("rebuild_central9_enabled", False)
         )
         player_base_replenish_enabled = any(
             bool(app_config.get(f"rebuild_player_{message_id:04X}_enabled", False))
@@ -1827,7 +1827,7 @@ def _ace_try_replay_template(
         )
     elif rebuild_controls_v2:
         central9_replenish_enabled = bool(
-            v128_enabled and app_config.get("rebuild_central9_enabled", True)
+            v128_enabled and app_config.get("rebuild_central9_enabled", False)
         )
         player_base_replenish_enabled = bool(
             app_config.get("rebuild_player_base_enabled", False)
@@ -1842,7 +1842,7 @@ def _ace_try_replay_template(
             v128_enabled and app_config.get("rebuild_strong_profile", True)
         )
     else:
-        central9_replenish_enabled = bool(v128_enabled)
+        central9_replenish_enabled = False
         legacy_full = bool(
             app_config.get("full_rebuild_01_mode", False)
             and not legacy_central9_only

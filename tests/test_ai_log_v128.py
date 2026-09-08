@@ -70,7 +70,7 @@ class V128AiLogTests(unittest.TestCase):
         with open(os.path.join(run_dir, "manifest.json"), encoding="utf-8") as stream:
             manifest = json.load(stream)
         self.assertEqual(manifest["schema"], "dfm-ai-log-manifest-v1")
-        self.assertEqual(manifest["app_version"], "v1.131.0")
+        self.assertEqual(manifest["app_version"], "v1.131.2")
         self.assertEqual(manifest["record_format"], "jsonl-one-object-per-line")
         self.assertIn("v128_model_revision", manifest)
         self.assertEqual(
@@ -178,6 +178,34 @@ class V128AiLogTests(unittest.TestCase):
         self.assertEqual(raw_request["schema"], "dfm-ai-raw-tcp-request-v1")
         self.assertEqual(raw_request["raw_tcp_hex"], b"\x01\x00RAW-TCP-CHUNK".hex().upper())
         self.assertEqual(raw_request["capture_stage"], "socket_read_pre_protocol_split")
+
+        frame_3366 = (
+            b"\x33\x66\x00\x0B\x00\x0C\x40\x13"
+            + b"\x00" * 11
+            + (16).to_bytes(2, "big")
+            + b"\x00" * 4
+            + b"\x11" * 16
+        )
+        TrafficSessionLog.log_33_uplink(
+            conn_id="conn-3366",
+            client_ip="1.2.3.4",
+            uid="GAME-AI",
+            mode="record",
+            cipher_bytes=frame_3366,
+            plain_bytes=b"\x01\x0A\x00\x09" + b"PLAIN",
+            username="test",
+        )
+        row_3366 = self.read_jsonl(
+            os.path.join(run_dir, "record_3366_frames.jsonl")
+        )[0]
+        self.assertEqual(row_3366["schema"], "dfm-ai-3366-frame-v1")
+        self.assertEqual(row_3366["message_type_hex"], "4013")
+        self.assertEqual(row_3366["raw_frame_hex"], frame_3366.hex().upper())
+        self.assertEqual(row_3366["ciphertext_hex"], (b"\x11" * 16).hex().upper())
+        self.assertEqual(row_3366["plaintext_hex"], (b"\x01\x0A\x00\x09" + b"PLAIN").hex().upper())
+        self.assertEqual(row_3366["decrypt_status"], "success")
+        self.assertTrue(row_3366["contains_01_0a_00_09"])
+
         app_config.set("detail_01_log", False)
         TrafficSessionLog.log_tcp_raw(
             conn_id="conn-ai",
@@ -299,6 +327,7 @@ class V128AiLogTests(unittest.TestCase):
         self.assertIn("raw_tcp_requests.jsonl", names)
         self.assertIn("record_01_slices.jsonl", names)
         self.assertIn("record_leaves.jsonl", names)
+        self.assertIn("record_3366_frames.jsonl", names)
         self.assertIn("control_events.jsonl", names)
 
     def test_log_cleanup_applies_age_and_capacity_limits(self):
@@ -384,7 +413,7 @@ class V128AiLogTests(unittest.TestCase):
             account_id="GAME-AI",
             report_index=21,
         )
-        output_21, changed = _ace_try_replay_template(
+        output_21, _changed = _ace_try_replay_template(
             [live_21],
             [],
             cursor,
@@ -392,8 +421,7 @@ class V128AiLogTests(unittest.TestCase):
             on_log=details.append,
             session_elapsed_seconds=31.0,
         )
-        self.assertTrue(changed)
-        self.assertEqual(len(output_21), 2)
+        self.assertEqual(len(output_21), 1)
         path = TrafficSessionLog.log_01_replay_analysis_event(
             detail=details[-1],
             username="any-user",
@@ -427,28 +455,27 @@ class V128AiLogTests(unittest.TestCase):
         groups = self.read_jsonl(os.path.join(run_dir, "replay_groups.jsonl"))
         leaves = self.read_jsonl(os.path.join(run_dir, "replay_leaves.jsonl"))
         self.assertEqual(len(events), 2)
-        self.assertEqual(events[0]["group_counts"]["output"], 2)
-        self.assertEqual(events[0]["v128"]["injected_report_count"], 1)
-        self.assertEqual(events[0]["v128"]["injected_leaf_count"], 16)
-        self.assertEqual(events[0]["v128"]["offsets_after"]["leaf_offset"], 16)
+        self.assertEqual(events[0]["group_counts"]["output"], 1)
+        self.assertEqual(events[0]["v128"]["injected_report_count"], 0)
+        self.assertEqual(events[0]["v128"]["injected_leaf_count"], 0)
+        self.assertEqual(events[0]["v128"]["offsets_after"]["leaf_offset"], 0)
 
         output_groups = [row for row in groups if row["phase"] == "output"]
         self.assertEqual(
             [row["source"] for row in output_groups],
-            ["native", "v128_central9", "native"],
+            ["native", "native"],
         )
         self.assertEqual(
             [row["packet"]["report_index"] for row in output_groups],
-            [21, 22, 23],
+            [21, 22],
         )
         output_leaves = [row for row in leaves if row["phase"] == "output"]
         self.assertEqual(
             [row["record_sequence"] for row in output_leaves],
-            list(range(75, 93)),
+            [75, 76],
         )
         injected = [row for row in output_leaves if row["source"] == "v128_central9"]
-        self.assertEqual(len(injected), 16)
-        self.assertTrue(all(row["raw_hex"] for row in injected))
+        self.assertEqual(len(injected), 0)
 
         completed = subprocess.run(
             [sys.executable, "tools/analyze_ai_logs.py", run_dir],
@@ -460,7 +487,7 @@ class V128AiLogTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         summary = json.loads(completed.stdout)
         self.assertTrue(summary["pass"])
-        self.assertEqual(summary["counts"]["output_source_v128_central9"], 1)
+        self.assertEqual(summary["counts"].get("output_source_v128_central9", 0), 0)
 
     def test_two_tier_profiles_keep_all_users_and_promote_anomalies(self):
         app_config.set("ai_log_user_filter", "test")  # v128.2旧白名单不再丢其他用户

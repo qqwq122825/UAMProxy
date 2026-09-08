@@ -875,14 +875,13 @@ class V128ReplenishTests(unittest.TestCase):
             on_log=logs.append,
             session_elapsed_seconds=31.0,
         )
-        self.assertTrue(changed)
         inserted_ids = []
         for source in output[1:]:
             _, inserted = self.decode_frame(source)
             inserted_ids.extend(
                 row["message_id"] for row in inserted["leaves"]
             )
-        self.assertIn(0x8000, inserted_ids)
+        self.assertNotIn(0x8000, inserted_ids)
         self.assertNotIn(0x8023, inserted_ids)
         supplement = logs[0]["v128_replenish"]["same_device_player"]
         self.assertFalse(supplement["enabled"])
@@ -910,14 +909,13 @@ class V128ReplenishTests(unittest.TestCase):
             on_log=logs.append,
             session_elapsed_seconds=31.0,
         )
-        self.assertTrue(changed)
         inserted_ids = []
         for source in output[1:]:
             _, inserted = self.decode_frame(source)
             inserted_ids.extend(
                 row["message_id"] for row in inserted["leaves"]
             )
-        self.assertIn(0x8000, inserted_ids)
+        self.assertNotIn(0x8000, inserted_ids)
         self.assertNotIn(0x8023, inserted_ids)
         self.assertEqual(
             logs[0]["v128_replenish"]["same_device_player"]["gate"],
@@ -2650,7 +2648,7 @@ class V128ReplenishTests(unittest.TestCase):
         self.assertTrue(late["changed"])
         self.assertTrue(any("PLAYER:8023@30" in key for key in late["keys"]))
 
-    def test_slot30_injects_independent_report_and_shifts_next_live(self):
+    def test_empty_central9_model_does_not_inject_at_slot30(self):
         cursor = [0, 0, {}]
         live_21 = frame(
             leaf(75, fill=0x22, message_id=0x1004, length=44),
@@ -2665,283 +2663,31 @@ class V128ReplenishTests(unittest.TestCase):
             special_rule_store=self.store,
             session_elapsed_seconds=31.0,
         )
-        self.assertTrue(changed)
-        self.assertEqual(len(first), 2)
+        self.assertEqual(len(first), 1)
         report_21, native = self.decode_frame(first[0])
-        report_22, inserted = self.decode_frame(first[1])
         self.assertEqual(report_21, 21)
-        self.assertEqual(report_22, 22)
         self.assertTrue(native["ok"])
-        self.assertTrue(inserted["ok"])
         self.assertEqual(
             [leaf_row["record_sequence"] for leaf_row in native["leaves"]],
             [75],
         )
-        self.assertEqual(
-            [leaf_row["record_sequence"] for leaf_row in inserted["leaves"]],
-            list(range(76, 92)),
-        )
-        inserted_ids = [leaf_row["message_id"] for leaf_row in inserted["leaves"]]
-        self.assertEqual(len(inserted_ids), 16)
-        self.assertEqual(inserted_ids.count(0x8004), 9)
-        self.assertEqual(int.from_bytes(first[0][8:10], "big"), 21)
-        self.assertEqual(int.from_bytes(first[1][8:10], "big"), 22)
-        self.assertEqual(int.from_bytes(first[0][36:38], "big"), 21)
-        self.assertEqual(int.from_bytes(first[1][36:38], "big"), 22)
+        inserted_ids = [leaf_row["message_id"] for leaf_row in native["leaves"]]
+        self.assertNotIn(0x8000, inserted_ids)
+        self.assertNotIn(0x8004, inserted_ids)
+        if changed:
+            state = cursor[2].get("v128_replenish") or {}
+            self.assertEqual(state.get("report_offset", 0), 0)
+            self.assertEqual(state.get("leaf_offset", 0), 0)
 
-        live_22 = frame(
-            leaf(76, fill=0x33, message_id=0x1004, length=44),
-            account_id="GAME-42",
-            report_index=22,
-        )
-        second_logs = []
-        second, changed_second = _ace_try_replay_template(
-            [live_22],
-            [],
-            cursor,
-            expected_game_id="GAME-42",
-            special_rule_store=self.store,
-            on_log=second_logs.append,
-            session_elapsed_seconds=32.0,
-        )
-        self.assertTrue(changed_second)
-        self.assertEqual(len(second), 1)
-        report_23, shifted = self.decode_frame(second[0])
-        self.assertEqual(report_23, 23)
-        self.assertEqual(
-            [leaf_row["record_sequence"] for leaf_row in shifted["leaves"]],
-            [92],
-        )
-        self.assertEqual(int.from_bytes(second[0][8:10], "big"), 23)
-        self.assertEqual(int.from_bytes(second[0][36:38], "big"), 23)
-        self.assertEqual(second_logs[0]["decision"], "REPLACE")
-        self.assertEqual(second_logs[0]["reason"], "V128_SEQUENCE_OFFSET_SHIFT")
-        self.assertEqual(
-            second_logs[0]["replacement_level"], "V128_SEQUENCE_OFFSET"
-        )
-        self.assertEqual(
-            second_logs[0]["replace_mode"], "type9_v128_sequence_offset"
-        )
-        self.assertFalse(second_logs[0]["final_equals_live"])
-        state = cursor[2]["v128_replenish"]
-        self.assertEqual(state["report_offset"], 1)
-        self.assertEqual(state["leaf_offset"], 16)
-        self.assertEqual(state["frame_offset"], 1)
-        self.assertEqual(state["group_offset"], 1)
-
-    def test_partial_live_8004_fills_only_missing_subtypes(self):
-        dirty_8004 = bytearray(self.builtin_leaf(0x8004, 0, 1))
-        dirty_8004[0x24:0x28] = b"\xAA\xBB\xCC\xDD"
-        live = frame(
-            batch_children(
-                0,
-                bytes(dirty_8004),
-                leaf(2, fill=0, message_id=0x1004, length=44),
-            ),
-            account_id="GAME-42",
-            report_index=1,
-        )
-        output, _ = _ace_try_replay_template(
-            [live],
-            [],
-            [0, 0, {}],
-            expected_game_id="GAME-42",
-            special_rule_store=self.store,
-            session_elapsed_seconds=31.0,
-        )
-        self.assertEqual(len(output), 2)
-        _, native = self.decode_frame(output[0])
-        native_8004 = next(
-            row for row in native["leaves"] if row["message_id"] == 0x8004
-        )
-        self.assertEqual(
-            native_8004["raw"],
-            self.builtin_leaf(0x8004, 0, 1),
-        )
-        _, inserted = self.decode_frame(output[1])
-        ids = [leaf_row["message_id"] for leaf_row in inserted["leaves"]]
-        self.assertEqual(ids.count(0x8004), 8)
-        self.assertEqual(len(ids), 15)
-
-    def test_live_builtin_body_is_replaced_by_authoritative_template(self):
-        dirty = bytearray(self.builtin_leaf(0x8000, 0, 1))
-        dirty[0x20:] = b"\xA5" * (len(dirty) - 0x20)
-        output, changed = _ace_try_replay_template(
-            [
-                frame(
-                    bytes(dirty),
-                    account_id="GAME-42",
-                    report_index=1,
-                )
-            ],
-            [],
-            [0, 0, {}],
-            expected_game_id="GAME-42",
-            special_rule_store=self.store,
-            session_elapsed_seconds=31.0,
-        )
-        self.assertTrue(changed)
-        self.assertEqual(len(output), 2)
-        _, native = self.decode_frame(output[0])
-        self.assertEqual(
-            [row["message_id"] for row in native["leaves"]],
-            [0x8000],
-        )
-        self.assertEqual(
-            native["leaves"][0]["raw"],
-            self.builtin_leaf(0x8000, 0, 1),
-        )
-        _, inserted = self.decode_frame(output[1])
-        self.assertNotIn(
-            0x8000,
-            [row["message_id"] for row in inserted["leaves"]],
-        )
-
-    def test_unexpected_live_builtin_slot_is_emptied_and_due_slot_is_injected(self):
-        unexpected = bytearray(self.builtin_leaf(0x8000, 0, 1))
-        unexpected[0x1C:0x1E] = (31).to_bytes(2, "big")
-        output, changed = _ace_try_replay_template(
-            [
-                frame(
-                    bytes(unexpected),
-                    account_id="GAME-42",
-                    report_index=1,
-                )
-            ],
-            [],
-            [0, 0, {}],
-            expected_game_id="GAME-42",
-            special_rule_store=self.store,
-            session_elapsed_seconds=31.0,
-        )
-        self.assertTrue(changed)
-        self.assertEqual(len(output), 2)
-        _, native = self.decode_frame(output[0])
-        self.assertEqual(
-            [row["message_id"] for row in native["leaves"]],
-            [0x2000],
-        )
-        _, inserted = self.decode_frame(output[1])
-        self.assertIn(
-            0x8000,
-            [row["message_id"] for row in inserted["leaves"]],
-        )
-
-    def test_full_live_8004_suppresses_all_nine_subtypes_for_slot(self):
-        children = [
-            self.builtin_leaf(0x8004, index, index + 1)
-            for index in range(9)
-        ]
-        live = frame(
-            batch_children(0, *children),
-            account_id="GAME-42",
-            report_index=1,
-        )
-        output, _ = _ace_try_replay_template(
-            [live],
-            [],
-            [0, 0, {}],
-            expected_game_id="GAME-42",
-            special_rule_store=self.store,
-            session_elapsed_seconds=31.0,
-        )
-        self.assertEqual(len(output), 2)
-        _, inserted = self.decode_frame(output[1])
-        ids = [leaf_row["message_id"] for leaf_row in inserted["leaves"]]
-        self.assertNotIn(0x8004, ids)
-        self.assertEqual(len(ids), 7)
-
-    def test_live_slot_does_not_disable_next_periodic_slot(self):
-        state = ensure_v128_state({})
-        first = collect_due_groups(
-            state,
-            elapsed_seconds=31.0,
-            live_leaves=[{"raw": self.builtin_leaf(0x8000, 0, 1)}],
-        )
-        self.assertFalse(
-            any(
-                row["message_id"] == 0x8000
-                for group in first
-                for row in group["rows"]
-            )
-        )
-        second = collect_due_groups(
-            state,
-            elapsed_seconds=631.0 * WALL_SECONDS_PER_LOGICAL_SLOT,
-        )
-        self.assertTrue(
-            any(
-                row["message_id"] == 0x8000 and row["slot"] == 630
-                for group in second
-                for row in group["rows"]
-            )
-        )
-
-    def test_late_live_duplicate_becomes_sequence_preserving_2000(self):
-        cursor = [0, 0, {}]
-        first_live = frame(
-            leaf(75, fill=0x22, message_id=0x1004, length=44),
-            account_id="GAME-42",
-            report_index=21,
-        )
-        first, _ = _ace_try_replay_template(
-            [first_live],
-            [],
-            cursor,
-            expected_game_id="GAME-42",
-            special_rule_store=self.store,
-            session_elapsed_seconds=31.0,
-        )
-        self.assertEqual(len(first), 2)
-
-        late_live = frame(
-            self.builtin_leaf(0x8000, 0, 76),
-            account_id="GAME-42",
-            report_index=22,
-        )
-        second, changed = _ace_try_replay_template(
-            [late_live],
-            [],
-            cursor,
-            expected_game_id="GAME-42",
-            special_rule_store=self.store,
-            session_elapsed_seconds=32.0,
-        )
-        self.assertTrue(changed)
-        self.assertEqual(len(second), 1)
-        _, decoded = self.decode_frame(second[0])
-        self.assertEqual(
-            [row["message_id"] for row in decoded["leaves"]],
-            [0x2000],
-        )
-        self.assertEqual(
-            [row["record_sequence"] for row in decoded["leaves"]],
-            [92],
-        )
-        state = cursor[2]["v128_replenish"]
-        self.assertIn("8000@30#single", state["late_live_keys"])
-
-    def test_scheduler_skips_old_slots_after_long_idle(self):
+    def test_scheduler_skips_nothing_when_central9_model_empty(self):
         state = ensure_v128_state({})
         groups = collect_due_groups(state, elapsed_seconds=500.0)
         self.assertEqual(groups, [])
-        self.assertTrue(state["skipped_stale"])
+        self.assertFalse(state["skipped_stale"])
 
-    def test_builtin_model_has_nine_families(self):
-        self.assertEqual(
-            BUILTIN_MESSAGE_IDS,
-            {
-                0x8000,
-                0x8002,
-                0x8003,
-                0x8004,
-                0x800B,
-                0x8020,
-                0x8021,
-                0x8025,
-                0x8028,
-            },
-        )
+    def test_builtin_model_has_no_dfm_central9_families(self):
+        self.assertEqual(BUILTIN_MESSAGE_IDS, set())
+        self.assertEqual(BUILTIN_MODEL, {})
 
     def test_strong_profile_file_pairs_arm_only_their_confirmed_ids(self):
         state = ensure_v128_state({})

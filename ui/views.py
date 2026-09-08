@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QObject, QDate, QTimer, QUrl, QEvent
 from PySide6.QtGui import QColor, QFont, QTextCursor, QDesktopServices
 
-APP_VERSION = "v1.131.1"
+APP_VERSION = "v1.131.2"
 
 from core.config import app_config, DATA_DIR, CONFIG_FILE
 from core.edition import APP_DISPLAY_NAME
@@ -922,7 +922,7 @@ class MainWindow(QMainWindow):
         core_grid.setVerticalSpacing(4)
         self.cb_rebuild_central9 = QCheckBox("中央9类")
         self.cb_rebuild_central9.setToolTip(
-            "补发中央固定九类：8000/8002/8003/8004/800B/8020/8021/8025/8028。"
+            "三角洲中央九类内置模板已移除；暗区干净录制未见 8000/8002/8003/8004/800B/8020/8021/8025/8028。"
         )
         self.cb_rebuild_strong_profile = QCheckBox("强检重建（8C03/9100）")
         self.cb_rebuild_strong_profile.setToolTip(
@@ -3003,7 +3003,7 @@ class MainWindow(QMainWindow):
         controls_v3 = bool(app_config.get("rebuild_controls_v3", False))
         player_ids = ("8007", "800A", "800C", "800D", "800F", "8023", "8024", "802C")
         if controls_v3:
-            central9 = bool(app_config.get("rebuild_central9_enabled", True))
+            central9 = bool(app_config.get("rebuild_central9_enabled", False))
             player_values = {
                 mid: bool(app_config.get(f"rebuild_player_{mid}_enabled", False))
                 for mid in player_ids
@@ -3019,7 +3019,7 @@ class MainWindow(QMainWindow):
             )
             player_base = player_values["800D"]
         elif controls_v2:
-            central9 = bool(app_config.get("rebuild_central9_enabled", True))
+            central9 = bool(app_config.get("rebuild_central9_enabled", False))
             player_base = bool(app_config.get("rebuild_player_base_enabled", False))
             player_values = {mid: False for mid in player_ids}
             if player_base:
@@ -3036,7 +3036,7 @@ class MainWindow(QMainWindow):
                 app_config.get("full_rebuild_01_mode", False)
                 and not central_only
             )
-            central9 = True
+            central9 = False
             player_base = legacy_full
             player_values = {mid: False for mid in player_ids}
             if player_base:
