@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QObject, QDate, QTimer, QUrl, QEvent
 from PySide6.QtGui import QColor, QFont, QTextCursor, QDesktopServices
 
-APP_VERSION = "v1.131.2"
+APP_VERSION = "v1.132.0"
 
 from core.config import app_config, DATA_DIR, CONFIG_FILE
 from core.edition import APP_DISPLAY_NAME
@@ -27,9 +27,9 @@ from core.managers import user_manager, local_map_manager
 from core.pool import recording_pool
 from core.replay_session_v130 import REPLAY_PHASE_CONTINUE, REPLAY_PHASE_FIRST
 from core.server import engine, _check_external_proxy
-from core.dfm_message_catalog import (
-    DFM_KNOWN_MESSAGE_ID_CATALOG,
-    DFM_REPLAY_80XX_MESSAGE_IDS,
+from core.uam_message_catalog import (
+    UAM_KNOWN_MESSAGE_ID_CATALOG,
+    UAM_REPLAY_80XX_MESSAGE_IDS,
     format_recording_period_status,
 )
 
@@ -967,7 +967,7 @@ class MainWindow(QMainWindow):
             (self.cb_rebuild_player_800A, "仅复放已录800A slot/正文；不按900或30外推。"),
             (self.cb_rebuild_player_800C, "仅复放已录800C叶；不做周期外推或nearest替换。"),
             (self.cb_rebuild_player_800F, "仅复放已录800F画像；不在全零/非零画像间猜切换。"),
-            (self.cb_rebuild_player_8023, "仅复放已录8023一次性叶；不按新连接创建。"),
+            (self.cb_rebuild_player_8023, "8023：仅复放已录 160B 周期叶（UAM 样本口径）。"),
         ):
             checkbox.setToolTip(tip)
         a_grid = QGridLayout()
@@ -1069,7 +1069,7 @@ class MainWindow(QMainWindow):
         self.spin_message_coverage_threshold.setRange(1, 100)
         self.spin_message_coverage_threshold.setSuffix(" %")
         self.spin_message_coverage_threshold.setToolTip(
-            f"完整度包含 {len(DFM_REPLAY_80XX_MESSAGE_IDS)} 个80xx消息ID覆盖，"
+            f"完整度包含 {len(UAM_REPLAY_80XX_MESSAGE_IDS)} 个 UAM 样本 message_id，"
             "8004的9个子型，8007/800D/802C的600-slot、800F的900-slot、"
             "800A按当前模板（稀疏900或三簇一致间隔），"
             "以及8027/8029短波尾巴59或长波递减加第二波开扫。"
@@ -1324,7 +1324,7 @@ class MainWindow(QMainWindow):
         detail_vlay.addLayout(det_title_bar)
 
         self.lbl_rec_coverage_summary = QLabel(
-            f"80xx覆盖率 0.0% · 0/{len(DFM_REPLAY_80XX_MESSAGE_IDS)} 个核心消息"
+            f"样本覆盖率 0.0% · 0/{len(UAM_REPLAY_80XX_MESSAGE_IDS)} 类"
         )
         self.lbl_rec_coverage_summary.setStyleSheet(
             "background:#eef2ff;color:#3730a3;border-radius:5px;"
@@ -1337,7 +1337,7 @@ class MainWindow(QMainWindow):
         # 左：内置消息目录及当前录制命中情况
         pkt_w = QWidget()
         pkt_v = QVBoxLayout(pkt_w); pkt_v.setContentsMargins(0, 0, 0, 0)
-        pkt_v.addWidget(QLabel("消息目录（80xx核心优先，其他消息用于长录制分析）"))
+        pkt_v.addWidget(QLabel("消息目录（UAM v1.132 样本 48 类）"))
         self.rec_coverage_table = QTableWidget(0, 6)
         self.rec_coverage_table.setHorizontalHeaderLabels(
             ["状态", "消息ID", "名称", "次数", "长度(B)", "周期状态"]
@@ -4271,7 +4271,7 @@ class MainWindow(QMainWindow):
             coverage_item.setTextAlignment(Qt.AlignCenter)
             coverage_item.setToolTip(
                 f"80xx已见 {int(coverage.get('seen_priority_count') or 0)} / "
-                f"{int(coverage.get('priority_total') or len(DFM_REPLAY_80XX_MESSAGE_IDS))}；"
+                f"{int(coverage.get('priority_total') or len(UAM_REPLAY_80XX_MESSAGE_IDS))}；"
                 f"8004子型 {int(coverage.get('subtype_8004_seen_count') or 0)}/"
                 f"{int(coverage.get('subtype_8004_total') or 9)}；"
                 f"全量已知覆盖 {float(coverage.get('coverage_percent') or 0.0):.1f}%"
@@ -4456,16 +4456,13 @@ class MainWindow(QMainWindow):
         self.rec_coverage_table.setRowCount(0)
         for idx, (message_id, name) in enumerate(
             sorted(
-                DFM_KNOWN_MESSAGE_ID_CATALOG.items(),
-                key=lambda row: (
-                    0 if row[0] in DFM_REPLAY_80XX_MESSAGE_IDS else 1,
-                    row[0],
-                ),
+                UAM_KNOWN_MESSAGE_ID_CATALOG.items(),
+                key=lambda row: row[0],
             )
         ):
             self.rec_coverage_table.insertRow(idx)
             hit = message_id in seen
-            is_priority = message_id in DFM_REPLAY_80XX_MESSAGE_IDS
+            is_priority = message_id in UAM_REPLAY_80XX_MESSAGE_IDS
             periodic_text = format_recording_period_status(
                 message_id,
                 coverage=coverage,
@@ -4474,9 +4471,9 @@ class MainWindow(QMainWindow):
             )
             values = [
                 (
-                    "✓ 核心已见" if hit else "○ 核心缺失"
+                    "✓ 已见" if hit else "○ 未见"
                 ) if is_priority else (
-                    "✓ 辅助已见" if hit else "· 辅助"
+                    "✓ 已见" if hit else "· 未见"
                 ),
                 f"{message_id:04X}",
                 name,
@@ -4512,7 +4509,7 @@ class MainWindow(QMainWindow):
             coverage.get("recording_completion_percent") or 0.0
         )
         self.lbl_rec_coverage_summary.setText(
-            f"设备 {device_text} · 80xx覆盖率 {pct:.1f}% · {seen_count}/{known_total} 个核心消息 · "
+            f"设备 {device_text} · 样本覆盖率 {pct:.1f}% · {seen_count}/{known_total} 类 · "
             f"8004子型 {subtype_8004_seen}/{subtype_8004_total} · "
             f"周期就绪 {periodic_ready}/{periodic_total} · "
             f"录制完整度 {completion_pct:.1f}% · "
@@ -4914,7 +4911,7 @@ class MainWindow(QMainWindow):
             self.rec_coverage_table.setRowCount(0)
             self.rec_coverage_notes.clear()
             self.lbl_rec_coverage_summary.setText(
-                f"80xx覆盖率 0.0% · 0/{len(DFM_REPLAY_80XX_MESSAGE_IDS)} 个核心消息"
+                f"样本覆盖率 0.0% · 0/{len(UAM_REPLAY_80XX_MESSAGE_IDS)} 类"
             )
 
     # ─── 本地重放操作 ───────────────────────

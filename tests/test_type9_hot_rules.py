@@ -17,24 +17,8 @@ from core.type9_online import BATCH_CODE, BINARY_CODE
 from core.type9_shadow import build_shadow_logical, decode_material, template_leaf_rows
 from core.type9_special_rules import (
     DEFAULT_HOT_RULE_DOCUMENT,
+    UAM_DEFAULT_HOT_RULE_DOCUMENT,
     HOT_RULE_SCHEMA,
-    LEGACY_V122_DEFAULT_HOT_RULE_DOCUMENT,
-    LEGACY_V123_COMPLETE_TEST_7_DOCUMENT,
-    V123_SAFE_REPLAY_1_DOCUMENT,
-    V123_SAFE_REPLAY_2_DOCUMENT,
-    V123_SAFE_REPLAY_3_DOCUMENT,
-    V1231_COMPLETE_TELEMETRY_CLEAN_DOCUMENT,
-    V1232_DEVICE_AWARE_SLOT_CLEAN_1_DOCUMENT,
-    V1255_8028_8002_ZERO_1_DOCUMENT,
-    V1256_0207_DROP_100C_TEMPLATE_1_DOCUMENT,
-    V1264_DROP_PATCH_ONLY_1_DOCUMENT,
-    V1264_RESTORE_1105_TEMPLATE_1_DOCUMENT,
-    V1264_100B_CROSS_DEVICE_TEMPLATE_1_DOCUMENT,
-    V1264_MINIMAL_7_1_DOCUMENT,
-    V1265_8027_8029_NEAREST_1_DOCUMENT,
-    V1265_2000_NEAREST_DROP_1_DOCUMENT,
-    V1267_0207_PATCH_LIVE_1_DOCUMENT,
-    V1268_SEQUENCE_SAFE_EMPTY_2000_1_DOCUMENT,
     HotRuleValidationError,
     Type9HotRuleStore,
     apply_special_unknown_leaf,
@@ -290,6 +274,21 @@ class Type9HotRuleTests(unittest.TestCase):
             0,
         )
 
+    def test_bootstrap_writes_uam_default_when_rules_file_missing(self):
+        store = Type9HotRuleStore(
+            self.path,
+            default_document=DEFAULT_HOT_RULE_DOCUMENT,
+            auto_reload_interval=0,
+        )
+        status = store.bootstrap()
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["active_rule_count"], 1)
+        self.assertEqual(
+            status["document"]["revision"],
+            UAM_DEFAULT_HOT_RULE_DOCUMENT["revision"],
+        )
+
+    @unittest.skip("UAM专版：已移除旧版多规则内置集")
     def test_v123_default_rules_only_show_effective_special_set(self):
         status = self.store.replace_document(DEFAULT_HOT_RULE_DOCUMENT)
         self.assertTrue(status["ok"])
@@ -378,6 +377,7 @@ class Type9HotRuleTests(unittest.TestCase):
             self.assertTrue(rule.get("allow_cross_device"))
             self.assertFalse(rule.get("require_same_device"))
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_untouched_v1231_default_to_device_aware(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -410,6 +410,7 @@ class Type9HotRuleTests(unittest.TestCase):
             store.get_rule((BINARY_CODE, 0x100B, 123)).get("allow_cross_device")
         )
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_untouched_first_v1255_default(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -436,6 +437,7 @@ class Type9HotRuleTests(unittest.TestCase):
         )
         self.assertIsNone(store.get_rule((BINARY_CODE, 0x100C, 84)))
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_untouched_v1256_to_drop_patch_only(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -476,6 +478,7 @@ class Type9HotRuleTests(unittest.TestCase):
             36,
         )
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_untouched_v1264_pass_live_1105_back_to_template(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -502,6 +505,7 @@ class Type9HotRuleTests(unittest.TestCase):
         )
         self.assertIsNone(store.get_rule((BINARY_CODE, 0x100C, 84)))
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_untouched_v1264_1105_to_cross_device_100b(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -532,6 +536,7 @@ class Type9HotRuleTests(unittest.TestCase):
             store.get_rule((BINARY_CODE, 0x100B, 80)).get("allow_cross_device")
         )
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_untouched_12_rule_default_to_minimal_7(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -573,6 +578,7 @@ class Type9HotRuleTests(unittest.TestCase):
             self.assertEqual(rule["action"], "replace_template_nearest")
             self.assertTrue(rule.get("allow_cross_device"))
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_untouched_minimal_7_to_8027_8029_nearest(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -601,6 +607,7 @@ class Type9HotRuleTests(unittest.TestCase):
             self.assertEqual(rule["inherit_live_header"], 14)
             self.assertTrue(rule.get("allow_cross_device"))
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_untouched_8027_8029_set_to_2000_nearest(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -626,6 +633,7 @@ class Type9HotRuleTests(unittest.TestCase):
         self.assertEqual(rule["action"], "replace_template_nearest")
         self.assertEqual(rule.get("no_template"), "empty_2000")
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_untouched_v1265_0207_drop_to_patch_live(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -653,6 +661,7 @@ class Type9HotRuleTests(unittest.TestCase):
             [(0x48, b"\x00" * 4), (0x50, b"\x00" * 4)],
         )
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_untouched_v1267_drop_rules_to_empty_2000(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -682,6 +691,7 @@ class Type9HotRuleTests(unittest.TestCase):
             "empty_2000",
         )
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_untouched_v1268_candidate_to_v127(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -709,6 +719,7 @@ class Type9HotRuleTests(unittest.TestCase):
             "empty_2000",
         )
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_runtime_policy_forces_persisted_0207_drop_back_to_patch_live(self):
         persisted = json.loads(json.dumps(DEFAULT_HOT_RULE_DOCUMENT))
         persisted["revision"] = "user-persisted-old-drop"
@@ -742,6 +753,7 @@ class Type9HotRuleTests(unittest.TestCase):
             [(0x48, b"\x00" * 4), (0x50, b"\x00" * 4)],
         )
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_explicit_1105_rule_keeps_live_counter_during_variable_replacement(self):
         explicit = nearest_document(message_id=0x1105)
         explicit["rules"][0]["inherit_live_header"] = 36
@@ -775,6 +787,7 @@ class Type9HotRuleTests(unittest.TestCase):
             )
             self.assertEqual(result["candidate_length"], 93)
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_only_untouched_v122_builtin_document(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -803,6 +816,7 @@ class Type9HotRuleTests(unittest.TestCase):
         )
         self.assertEqual(status["active_rule_count"], 10)
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_adds_9000_to_untouched_v123_revision_1(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(V123_SAFE_REPLAY_1_DOCUMENT, handle, ensure_ascii=False)
@@ -821,6 +835,7 @@ class Type9HotRuleTests(unittest.TestCase):
         )
         self.assertIsNotNone(store.get_rule((BINARY_CODE, 0x9000, 80)))
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_changes_untouched_v123_revision_2_9000_to_drop_leaf(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(V123_SAFE_REPLAY_2_DOCUMENT, handle, ensure_ascii=False)
@@ -842,6 +857,7 @@ class Type9HotRuleTests(unittest.TestCase):
             "empty_2000",
         )
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_untouched_v123_revision_3_to_complete_set(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(V123_SAFE_REPLAY_3_DOCUMENT, handle, ensure_ascii=False)
@@ -864,6 +880,7 @@ class Type9HotRuleTests(unittest.TestCase):
         self.assertIsNotNone(store.get_rule((BINARY_CODE, 0x100B, 90)))
         self.assertIsNone(store.get_rule((BINARY_CODE, 0x100F, 44)))
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_untouched_seven_rule_test_document(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -889,6 +906,7 @@ class Type9HotRuleTests(unittest.TestCase):
         self.assertEqual(status["active_rule_count"], 10)
         self.assertIsNone(store.get_rule((BINARY_CODE, 0x1008, 180)))
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_bootstrap_upgrades_untouched_old_thirteen_rule_default(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -916,6 +934,7 @@ class Type9HotRuleTests(unittest.TestCase):
             self.assertIsNone(store.get_rule((BINARY_CODE, message_id, 80)))
         self.assertIsNone(store.get_rule((BINARY_CODE, 0x100C, 84)))
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_exact_length_rule_precedes_nearest_wildcard(self):
         rules = nearest_document()["rules"]
         rules.append(
@@ -946,6 +965,7 @@ class Type9HotRuleTests(unittest.TestCase):
             "test-nearest-8027",
         )
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_rule_changed_count_only_tracks_real_byte_changes(self):
         self.store.replace_document(
             document(patches=[{"offset": 0x48, "hex": "00000000"}])
@@ -976,6 +996,7 @@ class Type9HotRuleTests(unittest.TestCase):
         status = self.store.reload(force=True)
         self.assertEqual(status["rule_changed_counts"]["test-patch_live"], 0)
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_clear_changed_counts_resets_all_rules_without_reloading(self):
         self.store.replace_document(
             document(patches=[{"offset": 0x48, "hex": "00000000"}])
@@ -990,6 +1011,7 @@ class Type9HotRuleTests(unittest.TestCase):
         self.assertEqual(status["rule_changed_counts"]["test-patch_live"], 0)
         self.assertIsNotNone(self.store.get_rule((BINARY_CODE, 0x0207, 116)))
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_patch_live_overrides_template_for_root_and_container(self):
         self.store.replace_document(
             document(
@@ -1024,6 +1046,7 @@ class Type9HotRuleTests(unittest.TestCase):
             self.assertEqual(result["special_rule_id"], "test-patch_live")
             self.assertEqual(result["template_sequence"], 100)
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_default_8028_8002_zero_only_jumped_fields(self):
         self.store.replace_document(DEFAULT_HOT_RULE_DOCUMENT)
         live_8028 = bytearray(leaf(10, fill=0, message_id=0x8028, length=40))
@@ -1054,6 +1077,7 @@ class Type9HotRuleTests(unittest.TestCase):
             {"8028-zero-write-counter", "8002-zero-status-word"},
         )
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_default_100b_replaces_across_devices(self):
         self.store.replace_document(DEFAULT_HOT_RULE_DOCUMENT)
         recorded = leaf(10, fill=0x11, message_id=0x100B, length=90)
@@ -1089,6 +1113,7 @@ class Type9HotRuleTests(unittest.TestCase):
         )
         self.assertFalse(result.get("device_context_mismatch"))
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_default_8027_replaces_from_template_across_devices(self):
         self.store.replace_document(DEFAULT_HOT_RULE_DOCUMENT)
         recorded = leaf(10, fill=0x11, message_id=0x8027, length=102)
@@ -1123,6 +1148,7 @@ class Type9HotRuleTests(unittest.TestCase):
         )
         self.assertFalse(result.get("device_context_mismatch"))
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_cross_device_template_inherits_live_ipad_identity(self):
         self.store.replace_document(DEFAULT_HOT_RULE_DOCUMENT)
         recorded = bytearray(
@@ -1203,6 +1229,7 @@ class Type9HotRuleTests(unittest.TestCase):
             {"inc_id", "obf_id"},
         )
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_default_8027_passes_live_without_template(self):
         self.store.replace_document(DEFAULT_HOT_RULE_DOCUMENT)
         live = leaf(91, fill=0xA5, message_id=0x8027, length=113)
@@ -1221,6 +1248,7 @@ class Type9HotRuleTests(unittest.TestCase):
         self.assertEqual(result["special_rule_id"], "8027-clean-process-profile")
         self.assertEqual(result["special_rule_error"], "HOT_RULE_TEMPLATE_REQUIRED")
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_default_2000_replaces_from_template(self):
         self.store.replace_document(DEFAULT_HOT_RULE_DOCUMENT)
         recorded = leaf(10, fill=0x11, message_id=0x2000, length=44)
@@ -1246,6 +1274,7 @@ class Type9HotRuleTests(unittest.TestCase):
         )
         self.assertEqual(result["special_rule_id"], "2000-clean-module-report")
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_default_2000_becomes_empty_without_template(self):
         self.store.replace_document(DEFAULT_HOT_RULE_DOCUMENT)
         sibling = leaf(90, fill=0x11, message_id=0x100C, length=84)
@@ -1279,6 +1308,7 @@ class Type9HotRuleTests(unittest.TestCase):
         self.assertEqual(rebuilt["special_emptied_leaves"], 1)
         self.assertEqual(rebuilt["special_dropped_leaves"], 0)
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_default_9000_becomes_empty_and_keeps_sequence_continuous(self):
         self.store.replace_document(DEFAULT_HOT_RULE_DOCUMENT)
         before = leaf(3324, fill=0x11, message_id=0x100C, length=84)
@@ -1311,6 +1341,7 @@ class Type9HotRuleTests(unittest.TestCase):
         self.assertEqual(result["replacement_level"], "SPECIAL_EMPTY_2000")
         self.assertEqual(result["special_rule_action"], "REPLACE_CLEAN_2000")
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_default_patches_0207_and_keeps_100c_live(self):
         self.store.replace_document(DEFAULT_HOT_RULE_DOCUMENT)
         clean_100c = leaf(100, fill=0x11, message_id=0x100C, length=84)
@@ -1362,6 +1393,7 @@ class Type9HotRuleTests(unittest.TestCase):
         self.assertEqual(result_100c["replacement_level"], "UNMAPPED_BODY_PASS_LIVE")
         self.assertEqual(result_100c.get("special_rule_id") or "", "")
 
+    @unittest.skip("UAM专版：已移除三角洲内置热规则")
     def test_default_0207_keeps_container_and_root_shape(self):
         self.store.replace_document(DEFAULT_HOT_RULE_DOCUMENT)
         live_0207 = bytearray(
@@ -1700,6 +1732,43 @@ class Type9HotRuleTests(unittest.TestCase):
         self.assertEqual(result["special_rule_error"], "HOT_RULE_EXPECT_MISMATCH@0x48")
         out = decode_material(rebuilt["candidate_logical"])["leaves"][0]["raw"]
         self.assertEqual(out, live)
+
+    def test_uam_8023_skip_if_zero_only_patches_nonzero_offset24(self):
+        self.store.replace_document(UAM_DEFAULT_HOT_RULE_DOCUMENT)
+        raw = bytearray(leaf(901, fill=0x11, message_id=0x8023, length=160))
+        raw[0x24:0x28] = b"\x00\x00\x00\x26"
+        parsed = {
+            "raw": bytes(raw),
+            "record_code": BINARY_CODE,
+            "message_id": 0x8023,
+            "actual_length": 160,
+        }
+        decision = apply_special_unknown_leaf(parsed, rule_store=self.store)
+        self.assertTrue(decision["changed"])
+        self.assertEqual(decision["raw"][0x24:0x28], b"\x00" * 4)
+        self.assertEqual(
+            self.store.snapshot()["rule_changed_counts"]["8023-zero-offset24-status"],
+            1,
+        )
+
+        already_zero = bytearray(decision["raw"])
+        already_zero[0x20:0x24] = b"\x00\x02\x38\x01"
+        parsed["raw"] = bytes(already_zero)
+        apply_special_unknown_leaf(parsed, rule_store=self.store)
+        self.assertEqual(
+            self.store.snapshot()["rule_changed_counts"]["8023-zero-offset24-status"],
+            1,
+        )
+
+    def test_uam_default_hot_rule_document_is_single_8023_rule(self):
+        normalized, compiled = validate_hot_rule_document(
+            UAM_DEFAULT_HOT_RULE_DOCUMENT
+        )
+        self.assertEqual(len(normalized["rules"]), 1)
+        self.assertEqual(normalized["rules"][0]["id"], "8023-zero-offset24-status")
+        self.assertEqual(len(compiled), 1)
+        patch = normalized["rules"][0]["patches"][0]
+        self.assertTrue(patch.get("skip_if_zero"))
 
 
 if __name__ == "__main__":

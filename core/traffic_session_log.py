@@ -269,10 +269,18 @@ class TrafficSessionLog:
                         run_dir=run_dir,
                         detailed=detailed,
                     )
+                from core.edition import APP_EDITION, APP_DISPLAY_NAME
+
+                _edition = str(APP_EDITION or "uam").strip().lower()
+                _hot_rules_semantic = (
+                    "uam-v1.131.2-8023-zero-offset24-1: "
+                    "only 0x8023/+0x24 nonzero→zero patch_live with rule_changed_counts"
+                )
                 manifest = {
-                    "schema": "dfm-01-replay-v6",
-                    "semantic_ruleset": "v1.124-tfp-called-global-clean-rules",
-                    "edition": "dfm",
+                    "schema": "uam-01-replay-v6",
+                    "semantic_ruleset": _hot_rules_semantic,
+                    "edition": _edition,
+                    "display_name": APP_DISPLAY_NAME,
                     "learning_mode": app_config.get(
                         "type9_learning_mode", "118-tiered-pass-live"
                     ),
@@ -285,7 +293,7 @@ class TrafficSessionLog:
                     "log_mode": "detailed" if detailed else "normal",
                     "created_at": datetime.now().isoformat(timespec="milliseconds"),
                     "packet_scope": "v1.124 dual device-profile Type9 replay and global tfp_called cleanup",
-                    "3366_policy": "dfm byte-for-byte pass-through; no decrypt, record, template selection, or 01 state mutation",
+                    "3366_policy": "uam decrypt/record path; 3366 frame parse and AI log",
                     "source_map": {
                         "network_output": "mechanically verified changed candidate; otherwise live frames",
                         "shadow_live": [
@@ -313,16 +321,10 @@ class TrafficSessionLog:
                             "player template first, published official template second",
                             "unmatched child leaves keep their complete live bytes by default",
                             "optional leaf-prune experiment with recursive length rebuild",
+                            _hot_rules_semantic,
                             "v1.128 built-in periodic stable 80xx independent-report "
                             "replenish with report/leaf/frame/group offsets; "
                             "v1.128.1 sequence-safe DROP_LEAF compaction; "
-                            "0207 forced patch_live at historical +0x48/+0x50 fields; "
-                            "9000 becomes sequence-safe empty 2000; "
-                            "2001/8028/8002 patch_live; "
-                            "100B/8027/8029 replace_template_nearest allow_cross_device; "
-                            "1105 replace_template_nearest inherit 36; "
-                            "2000 replace_template_nearest, missing template becomes empty 2000; "
-                            "100C/100F inherit Live; "
                             "device-mode base policy handles 1007/1008/1009",
                             "persistent unknown schema registry and byte variability profiles",
                         ],

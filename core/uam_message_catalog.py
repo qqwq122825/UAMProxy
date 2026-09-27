@@ -1,4 +1,4 @@
-"""DFM v1.130.9 已知 Type9 messageId、录制覆盖率与周期就绪统计。"""
+"""UAMProxy 暗区突围 Type9 messageId、录制覆盖率与周期就绪统计。"""
 
 from __future__ import annotations
 
@@ -16,126 +16,107 @@ from core.type9_v128_replenish import (
 )
 
 
-CATALOG_REVISION = "dfm-v130.9-period-status-labels-20260827"
+CATALOG_REVISION = "uam-v131.2-message-catalog-20260927"
 
-# 合并历史全量统计、正常长录制与2026-08-25强检长录制，共58个已知ID。
-# “已知”表示结构已在三角洲样本出现，不代表所有正文字段都已完成语义命名。
-DFM_KNOWN_MESSAGE_ID_CATALOG: dict[int, str] = {
-    0x0007: "固定二进制状态/身份块",
-    0x000F: "一次性结构状态",
-    0x0010: "一次性结构状态",
-    0x0100: "阶段状态块",
-    0x0101: "步进状态块 A",
-    0x0102: "步进状态块 B",
-    0x0103: "步进状态块 C",
-    0x0207: "异常页/缺页状态",
-    0x1000: "初始化向量",
-    0x1001: "会话启动时间",
-    0x1002: "周期测量值",
-    0x1003: "会话固定字",
-    0x1004: "静态周期状态",
-    0x1005: "会话运行值",
-    0x1006: "小型环境状态",
-    0x1007: "一次性代码指纹",
-    0x1008: "代码完整性指纹",
-    0x1009: "周期检测向量",
-    0x100A: "报告计数与事件时间",
-    0x100B: "UIKit 视图层级摘要",
-    0x100C: "代码入口完整性指纹",
-    0x100D: "空结果保留区",
-    0x100E: "周期号与测量值",
-    0x100F: "小型探针状态",
-    0x1011: "多槽状态文本",
-    0x1100: "会话初始化状态",
-    0x1105: "模块与路径枚举",
-    0x2000: "模块检测结果",
-    0x2001: "步进计数与行为向量",
-    0x8000: "环境初始化状态",
-    0x8002: "状态与计数组",
-    0x8003: "状态向量",
-    0x8004: "分组与子序号",
-    0x8007: "短系统状态向量",
-    0x800A: "长稀疏状态区",
-    0x800B: "空结果状态",
-    0x800C: "周期测量向量",
-    0x800D: "状态/版本/计数向量",
-    0x800F: "空结果状态",
-    0x8020: "空结果状态",
-    0x8021: "固定摘要标识",
-    0x8023: "多槽检测状态数组",
-    0x8024: "设备开机 epoch（+0x20）/ 首次落地 epoch（+0x24）",
-    0x8025: "空结果状态",
-    0x8027: "活动进程/应用枚举",
-    0x8028: "小型写入计数状态",
-    0x8029: "进程调用位置采样",
-    0x802A: "对局触发双份身份摘要",
-    0x802B: "对局触发 Lua 脚本/模块名",
-    0x802C: "设备墙钟相对开机 epoch 的秒数（+0x20）/ 四步链计数（+0x24/+0x28）",
-    0x8C03: "强检运行指标/性能状态",
-    0x9000: "安装应用/环境目标探测",
-    0x9100: "强检周期状态心跳",
-    0xFFF2: "TerSafe 主模块路径",
-    0xFFF3: "强动态路径/状态",
-    0xFFF9: "分型周期测量值",
-    0xFFFB: "TerSafe 周期状态",
-    0xFFFE: "多长度测量向量",
+# UAM v1.131.2 独立 01 通道实测 48 种 message_id（见数据/131/分析结果文档）。
+UAM_KNOWN_MESSAGE_ID_CATALOG: dict[int, str] = {
+    0x8007: "144B 固定正文块（稀疏周期样本）",
+    0x8023: "160B 周期计数与状态候选字段",
+    0x8030: "44B 单样本短记录",
+    0x80CC: "152B 双计数组与状态字",
+    0x80CD: "152B 配套双计数组与状态字",
+    0x80CF: "两分钟序号与动态正文",
+    0x8101: "56B 单样本记录",
+    0x8102: "80B 固定正文块",
+    0x8103: "60B 动态数值记录",
+    0x8104: "88B 固定正文块",
+    0x8105: "68B 固定正文块",
+    0x8106: "60B 固定正文块",
+    0x8107: "48B 固定正文块",
+    0x8108: "64B 固定正文块",
+    0x8109: "180B 固定正文块",
+    0x810A: "80B 双正文变体",
+    0x810B: "周期计数组与秒级递增字段",
+    0x810C: "112B 固定正文块",
+    0x810D: "84B 固定正文块",
+    0x810E: "模 8 槽位及动态数值",
+    0x810F: "112B 全零正文块",
+    0x8110: "114B 固定正文块",
+    0x8111: "44B 固定正文块",
+    0x8113: "56B 固定正文块",
+    0x8210: "44B 单样本短记录",
+    0x8217: "周期计数与变长正文",
+    0x8306: "44B 固定正文短记录",
+    0x8307: "184B 突发记录组",
+    0x8309: "170B 突发固定正文组",
+    0x8400: "48B 周期固定正文块",
+    0x8401: "55B 周期固定正文块",
+    0x8403: "40B 周期固定正文块",
+    0x8404: "44B 四正文变体组",
+    0x8405: "60B 周期固定正文块",
+    0x8409: "56B 周期固定正文块",
+    0x840C: "164B 周期固定正文块",
+    0x840D: "44B 周期固定正文块",
+    0x840E: "52B 启动阶段动态记录",
+    0x840F: "52B 双正文变体",
+    0x8410: "52B 周期固定正文块",
+    0x8411: "48B 单样本记录",
+    0x8417: "64B 周期固定正文块",
+    0x8418: "变长成组记录",
+    0xFFF2: "89B/161B 两种正文记录",
+    0xFFF3: "202B 键值计数汇总（24 项）",
+    0xFFF9: "42B 五正文变体组",
+    0xFFFB: "80B 周期计数记录",
+    0xFFFE: "周期变长记录及 37B 短事件混合",
 }
 
-DFM_KNOWN_MESSAGE_IDS = frozenset(DFM_KNOWN_MESSAGE_ID_CATALOG)
+UAM_KNOWN_MESSAGE_IDS = frozenset(UAM_KNOWN_MESSAGE_ID_CATALOG)
 
-# 重放补数据的核心覆盖集合：中央固定九类 + 同设备玩家十二类。
-# 其他消息仍保留在全量目录中用于长时间录制与版本更新分析，但不作为
-# “录制已完成”的主要判据。
-DFM_REPLAY_80XX_MESSAGE_IDS = frozenset(
-    {
-        0x8000,
-        0x8002,
-        0x8003,
-        0x8004,
-        0x8007,
-        0x800A,
-        0x800B,
-        0x800C,
-        0x800D,
-        0x800F,
-        0x8020,
-        0x8021,
-        0x8023,
-        0x8024,
-        0x8025,
-        0x8027,
-        0x8028,
-        0x8029,
-        0x802A,
-        0x802B,
-        0x802C,
-    }
-)
+# 录制详情「样本目录」覆盖范围 = 上述 48 类（不再使用旧 80xx 核心 21 类集合）。
+UAM_REPLAY_80XX_MESSAGE_IDS = UAM_KNOWN_MESSAGE_IDS
 
-DFM_8004_EXPECTED_SUBTYPES = frozenset({0, 1, 2, 3, 4, 5, 6, 7, 0x10})
+UAM_8004_EXPECTED_SUBTYPES = frozenset()
 
-# 8027/8029 共用一条扫描波，但界面按两个 ID 计入周期就绪。
-# 五档 slot = 8007/800D/802C/800F + 模板判定的 800A，再加扫描波两项，共 7。
-PLAYER_SCAN_WAVE_PERIODIC_IDS = (0x8027, 0x8029)
+PLAYER_SCAN_WAVE_PERIODIC_IDS = ()
 
 _80XX_RANGE_START = 0x8000
 _80XX_RANGE_END = 0x8FFF
 
-# 没有玩家就绪行的已知 80xx：录制「周期状态」写重建口径，禁止 "—"。
-# 8004 / 802A / 802B 走专用格式，不进这张表。
-STATIC_80XX_PERIOD_STATUS = {
-    0x8000: "默认 600-slot",
-    0x8002: "默认 600-slot",
-    0x8003: "默认 600-slot",
-    0x800B: "默认 900-slot",
-    0x800C: "无稳定周期",
-    0x8020: "默认 600-slot",
-    0x8021: "默认 420-slot",
-    0x8023: "一次性",
-    0x8024: "一次性 · 开机域",
-    0x8025: "一次性",
-    0x8028: "默认 240-slot",
-    0x8C03: "条件 120-slot",
+# v1.131.2 样本中间隔中位数观察（秒）；无条目则走录制统计或「见备注」。
+UAM_SAMPLE_PERIOD_STATUS: dict[int, str] = {
+    0x8007: "约 959 s（稀疏，待复核）",
+    0x8023: "约 120 秒（UAM 样本）",
+    0x8030: "单次观测",
+    0x80CC: "约 120 秒（样本）",
+    0x80CD: "约 120 秒（样本）",
+    0x80CF: "约 120 秒（样本）",
+    0x8102: "约 30 秒（样本）",
+    0x8103: "约 30 秒（样本）",
+    0x8104: "约 30 秒（样本）",
+    0x8105: "约 30 秒（样本）",
+    0x8106: "约 30 秒（样本）",
+    0x8107: "约 150 秒（样本）",
+    0x8108: "约 600 秒（样本）",
+    0x8109: "约 30 秒（样本）",
+    0x810A: "约 90 秒（样本）",
+    0x810B: "约 30 秒（样本）",
+    0x810C: "约 240 秒（样本）",
+    0x810D: "约 180 秒（样本）",
+    0x810E: "约 30 秒（样本）",
+    0x810F: "约 120 秒（样本）",
+    0x8110: "约 60 秒（样本）",
+    0x8111: "约 180 秒（样本）",
+    0x8113: "约 90 秒（样本）",
+    0x8217: "约 30 秒（样本）",
+    0x8306: "间隔不固定",
+    0x8307: "突发分组",
+    0x8309: "突发分组",
+    0x8400: "约 605 秒（样本）",
+    0x8404: "约 303 秒（成组）",
+    0xFFF3: "约 90 秒（样本）",
+    0xFFF9: "约 180 秒（成组）",
+    0xFFFB: "约 60 秒（样本）",
+    0xFFFE: "约 60 秒（混合）",
 }
 
 
@@ -144,9 +125,9 @@ def is_80xx_message_id(message_id: int) -> bool:
     return _80XX_RANGE_START <= value <= _80XX_RANGE_END
 
 
-DFM_KNOWN_80XX_MESSAGE_IDS = frozenset(
+UAM_KNOWN_80XX_MESSAGE_IDS = frozenset(
     message_id
-    for message_id in DFM_KNOWN_MESSAGE_IDS
+    for message_id in UAM_KNOWN_MESSAGE_IDS
     if is_80xx_message_id(message_id)
 )
 
@@ -161,7 +142,7 @@ def format_8004_period_status(coverage: dict | None = None) -> str:
     payload = coverage or {}
     seen = int(payload.get("subtype_8004_seen_count") or 0)
     total = int(
-        payload.get("subtype_8004_total") or len(DFM_8004_EXPECTED_SUBTYPES)
+        payload.get("subtype_8004_total") or len(UAM_8004_EXPECTED_SUBTYPES)
     )
     return f"子型 {seen}/{total} · 默认 300-slot"
 
@@ -214,7 +195,7 @@ def format_recording_period_status(
     match_event_mode: str | None = None,
     periodic: dict | None = None,
 ) -> str:
-    """录制详情表「周期状态」文案。80xx 禁止返回 "—"。"""
+    """录制详情表「周期状态」文案（UAM 样本口径）。"""
     mid = int(message_id)
     row = periodic
     if row is None:
@@ -224,15 +205,11 @@ def format_recording_period_status(
                 break
     if row:
         return _format_periodic_row_status(mid, row)
-    if mid == 0x8004:
-        return format_8004_period_status(coverage)
-    if mid in (0x802A, 0x802B):
-        return format_match_event_period_status(match_event_mode)
-    label = STATIC_80XX_PERIOD_STATUS.get(mid)
+    label = UAM_SAMPLE_PERIOD_STATUS.get(mid)
     if label:
         return label
-    if is_80xx_message_id(mid):
-        return "未知80xx"
+    if mid in UAM_KNOWN_MESSAGE_IDS:
+        return "见本次录制"
     return "—"
 
 
@@ -405,17 +382,17 @@ def summarize_message_observations(
         for message_id, values in lengths.items()
     }
     seen = set(normalized_counts)
-    seen_known = sorted(seen & DFM_KNOWN_MESSAGE_IDS)
-    missing = sorted(DFM_KNOWN_MESSAGE_IDS - seen)
-    unknown = sorted(seen - DFM_KNOWN_MESSAGE_IDS)
-    seen_priority = sorted(seen & DFM_REPLAY_80XX_MESSAGE_IDS)
-    missing_priority = sorted(DFM_REPLAY_80XX_MESSAGE_IDS - seen)
-    priority_total = len(DFM_REPLAY_80XX_MESSAGE_IDS)
+    seen_known = sorted(seen & UAM_KNOWN_MESSAGE_IDS)
+    missing = sorted(UAM_KNOWN_MESSAGE_IDS - seen)
+    unknown = sorted(seen - UAM_KNOWN_MESSAGE_IDS)
+    seen_priority = sorted(seen & UAM_REPLAY_80XX_MESSAGE_IDS)
+    missing_priority = sorted(UAM_REPLAY_80XX_MESSAGE_IDS - seen)
+    priority_total = len(UAM_REPLAY_80XX_MESSAGE_IDS)
     priority_coverage = (
         len(seen_priority) / priority_total * 100.0
         if priority_total else 100.0
     )
-    total = len(DFM_KNOWN_MESSAGE_IDS)
+    total = len(UAM_KNOWN_MESSAGE_IDS)
     coverage = (len(seen_known) / total * 100.0) if total else 100.0
     normalized_slots = {
         int(message_id): sorted({int(value) for value in values})
@@ -426,12 +403,12 @@ def summarize_message_observations(
         for message_id, values in (subtypes or {}).items()
     }
     seen_8004_subtypes = sorted(
-        set(normalized_subtypes.get(0x8004, [])) & DFM_8004_EXPECTED_SUBTYPES
+        set(normalized_subtypes.get(0x8004, [])) & UAM_8004_EXPECTED_SUBTYPES
     )
     missing_8004_subtypes = sorted(
-        DFM_8004_EXPECTED_SUBTYPES - set(seen_8004_subtypes)
+        UAM_8004_EXPECTED_SUBTYPES - set(seen_8004_subtypes)
     )
-    subtype_8004_total = len(DFM_8004_EXPECTED_SUBTYPES)
+    subtype_8004_total = len(UAM_8004_EXPECTED_SUBTYPES)
     subtype_8004_count = len(seen_8004_subtypes)
     subtype_8004_coverage = (
         subtype_8004_count / subtype_8004_total * 100.0

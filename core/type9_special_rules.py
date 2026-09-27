@@ -1,4 +1,4 @@
-"""v1.123 Type9 叶子专项规则与热加载入口。
+"""UAMProxy 暗区突围 Type9 叶子热规则与热加载入口。
 
 规则只允许声明式字节操作，不执行上传内容中的 Python 代码。运行时支持：
 
@@ -42,7 +42,6 @@ LeafKey = Tuple[int, Optional[int], int]
 RuleKey = Tuple[int, Optional[int], Optional[int]]
 LeafHandler = Callable[[bytes, Mapping[str, Any]], Optional[bytes]]
 
-HOT_RULE_SCHEMA = "dfm-type9-hot-rules-v1"
 HOT_RULES_FILE = os.path.join(DATA_DIR, "type9_hot_rules.json")
 MAX_RULE_FILE_BYTES = 512 * 1024
 _EMPTY_2000_TEMPLATE = bytes.fromhex(
@@ -107,800 +106,49 @@ def live_runtime_context_mismatch(
         and live_fields != candidate_fields
     )
 
-# v1.122 的旧内置全量文档只用于识别“未经用户修改的旧默认文件”。
-# v1.123 启动时会将它原子升级为新默认；用户自定义文件保持不动。
-LEGACY_V122_DEFAULT_HOT_RULE_DOCUMENT: dict[str, Any] = {
-    "schema": HOT_RULE_SCHEMA,
-    "revision": "v122-module-clean-1",
-    "rules": [
-        {
-            "id": "0207-zero-anomaly-counters",
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x0207",
-                "length": 116,
-            },
-            "action": "patch_live",
-            "patches": [
-                {
-                    "offset": "0x48",
-                    "hex": "00000000",
-                    "note": "body+0x28",
-                },
-                {
-                    "offset": "0x50",
-                    "hex": "00000000",
-                    "note": "body+0x30",
-                },
-            ],
-        },
-        {
-            "id": "2000-clean-module-report",
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x2000",
-                "length": "*",
-            },
-            "action": "replace_template_nearest",
-        },
-        {
-            "id": "1105-clean-module-enumeration",
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x1105",
-                "length": "*",
-            },
-            "action": "replace_template_nearest",
-            "inherit_live_header": 36,
-        },
-        {
-            "id": "8027-clean-process-profile",
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x8027",
-                "length": "*",
-            },
-            "action": "replace_template_nearest",
-        },
-        {
-            "id": "8029-clean-process-location-profile",
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x8029",
-                "length": "*",
-            },
-            "action": "replace_template_nearest",
-        },
-        {
-            "id": "9000-clean-installed-target-profile",
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x9000",
-                "length": "*",
-            },
-            "action": "replace_template_nearest",
-        },
-    ],
-}
 
-# v1.123 历史内置仅包含 0x0207 / 0x8027 / 0x8029 / 0x9000。
-# 后续默认将周期模块、行为向量、UIKit视图树和探针状态一并内置；
-# 代码完整性的设备模式策略由基座处理，其余仍保持声明式规则。
-BUILTIN_RULE_DESCRIPTIONS = {
-    "0207-zero-anomaly-counters": "疑似异常页/缺页状态：保留Live，清零状态字段及两个已确认计数字段",
-    "2001-zero-behavior-vector": "固定步进状态：保留前0x24字节及步进计数，清零后部20字节行为向量",
-    "1007-clean-code-entry-fingerprint": "一次性代码入口指纹：设备/会话相关，明确保留Live",
-    "1008-clean-code-integrity-vector": "代码完整性/系统调用指纹：设备/系统相关，明确保留Live",
-    "1009-clean-measurement-vector": "周期代码测量向量：阶段/地址相关，明确保留Live",
-    "100C-clean-code-integrity-entry": "代码入口及完整性指纹：机器码/尾部状态相关，明确保留Live",
-    "100B-clean-uikit-view-tree": "UIKit视图层级摘要：不再用录制模板替换，保留Live",
-    "100F-clean-probe-status": "小型探针状态三元组：不再用录制模板替换，保留Live",
-    "2000-clean-module-report": (
-        "周期模块检测结果：有玩家录制或官方模板则按最近长度替换并保留Live公共头；"
-        "没有对应叶则删叶"
-    ),
-    "1105-clean-module-enumeration": "周期模块/路径枚举：使用最近长度干净模板并保留Live前36字节",
-    "8027-clean-process-profile": "活动进程/应用枚举：黑名单脏进程先删叶，其余保留Live",
-    "8028-zero-write-counter": "80xx小型状态：保留+0x20的7，仅清零开追踪后跳变的+0x24累计",
-    "8029-clean-process-location-profile": "进程调用位置采样：黑名单脏进程先删叶，其余保留Live",
-    "8002-zero-status-word": "80xx状态叶：仅清零开追踪后从0变成3的+0x2C，其余字段保留Live",
-    "9000-clean-installed-target-profile": "命中型安装应用/环境目标项：改成真实44字节空结果0x2000并保留Live序号",
-}
-_V123_BUILTIN_RULE_IDS = {
-    "0207-zero-anomaly-counters",
-    "8027-clean-process-profile",
-    "8029-clean-process-location-profile",
-    "9000-clean-installed-target-profile",
-}
+HOT_RULE_SCHEMA = "uam-type9-hot-rules-v1"
+SUPPORTED_HOT_RULE_SCHEMAS = frozenset({HOT_RULE_SCHEMA, "dfm-type9-hot-rules-v1"})
 
-
-def _rules_with_descriptions(
-    rule_ids: set[str],
-    *,
-    drop_hit_only_9000: bool = False,
-) -> list[dict]:
-    rules = []
-    for source in LEGACY_V122_DEFAULT_HOT_RULE_DOCUMENT["rules"]:
-        rule_id = str(source.get("id") or "")
-        if rule_id not in rule_ids:
-            continue
-        rule = deepcopy(source)
-        rule["description"] = BUILTIN_RULE_DESCRIPTIONS.get(rule_id, "")
-        if drop_hit_only_9000 and rule_id == "9000-clean-installed-target-profile":
-            rule["action"] = "drop_leaf"
-        rules.append(rule)
-    return rules
-
-
-V123_SAFE_REPLAY_1_DOCUMENT: dict[str, Any] = {
-    "schema": HOT_RULE_SCHEMA,
-    "revision": "v123-safe-replay-1",
-    "rules": _rules_with_descriptions(
-        _V123_BUILTIN_RULE_IDS - {"9000-clean-installed-target-profile"}
-    ),
-}
-V123_SAFE_REPLAY_2_DOCUMENT: dict[str, Any] = {
-    "schema": HOT_RULE_SCHEMA,
-    "revision": "v123-safe-replay-2",
-    "rules": _rules_with_descriptions(_V123_BUILTIN_RULE_IDS),
-}
-V123_SAFE_REPLAY_3_DOCUMENT: dict[str, Any] = {
-    "schema": HOT_RULE_SCHEMA,
-    "revision": "v123-safe-replay-3",
-    "rules": _rules_with_descriptions(
-        _V123_BUILTIN_RULE_IDS,
-        drop_hit_only_9000=True,
+RULE_DESCRIPTIONS: dict[str, str] = {
+    "8023-zero-offset24-status": (
+        "UAM 0x8023 160B：+0x24 非零则清零；已为零不改写；"
+        "实际清零计入 rule_changed_counts"
     ),
 }
 
-V1232_DEVICE_AWARE_SLOT_CLEAN_1_DOCUMENT: dict[str, Any] = {
-    "schema": HOT_RULE_SCHEMA,
-    "revision": "v123.2-device-aware-slot-clean-1",
-    "rules": [
-        {
-            "id": "0207-zero-anomaly-counters",
-            "description": BUILTIN_RULE_DESCRIPTIONS[
-                "0207-zero-anomaly-counters"
-            ],
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x0207",
-                "length": 116,
-            },
-            "action": "patch_live",
-            "patches": [
-                {
-                    "offset": "0x20",
-                    "hex": "00000000",
-                    "note": "状态字段",
-                },
-                {
-                    "offset": "0x48",
-                    "hex": "00000000",
-                    "note": "body+0x28",
-                },
-                {
-                    "offset": "0x50",
-                    "hex": "00000000",
-                    "note": "body+0x30",
-                },
-            ],
-        },
-        {
-            "id": "2001-zero-behavior-vector",
-            "description": BUILTIN_RULE_DESCRIPTIONS[
-                "2001-zero-behavior-vector"
-            ],
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x2001",
-                "length": 56,
-            },
-            "action": "patch_live",
-            "patches": [
-                {
-                    "offset": "0x24",
-                    "hex": "0000000000000000000000000000000000000000",
-                    "note": "清零count后方四个浮点/行为向量字段",
-                }
-            ],
-        },
-        {
-            "id": "1007-clean-code-entry-fingerprint",
-            "description": BUILTIN_RULE_DESCRIPTIONS[
-                "1007-clean-code-entry-fingerprint"
-            ],
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x1007",
-                "length": "*",
-            },
-            "action": "pass_live",
-        },
-        {
-            "id": "1008-clean-code-integrity-vector",
-            "description": BUILTIN_RULE_DESCRIPTIONS[
-                "1008-clean-code-integrity-vector"
-            ],
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x1008",
-                "length": "*",
-            },
-            "action": "pass_live",
-        },
-        {
-            "id": "1009-clean-measurement-vector",
-            "description": BUILTIN_RULE_DESCRIPTIONS[
-                "1009-clean-measurement-vector"
-            ],
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x1009",
-                "length": "*",
-            },
-            "action": "pass_live",
-        },
-        {
-            "id": "100B-clean-uikit-view-tree",
-            "description": BUILTIN_RULE_DESCRIPTIONS[
-                "100B-clean-uikit-view-tree"
-            ],
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x100B",
-                "length": "*",
-            },
-            "action": "replace_template_nearest",
-            "inherit_live_header": 14,
-            "require_same_device": True,
-        },
-        {
-            "id": "100C-clean-code-integrity-entry",
-            "description": BUILTIN_RULE_DESCRIPTIONS[
-                "100C-clean-code-integrity-entry"
-            ],
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x100C",
-                "length": "*",
-            },
-            "action": "pass_live",
-        },
-        {
-            "id": "100F-clean-probe-status",
-            "description": BUILTIN_RULE_DESCRIPTIONS[
-                "100F-clean-probe-status"
-            ],
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x100F",
-                "length": "*",
-            },
-            "action": "replace_template_nearest",
-            "inherit_live_header": 14,
-            "require_same_device": True,
-        },
-        {
-            "id": "2000-clean-module-report",
-            "description": BUILTIN_RULE_DESCRIPTIONS[
-                "2000-clean-module-report"
-            ],
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x2000",
-                "length": "*",
-            },
-            "action": "replace_template_nearest",
-            "inherit_live_header": 14,
-        },
-        {
-            "id": "1105-clean-module-enumeration",
-            "description": BUILTIN_RULE_DESCRIPTIONS[
-                "1105-clean-module-enumeration"
-            ],
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x1105",
-                "length": "*",
-            },
-            "action": "replace_template_nearest",
-            "inherit_live_header": 36,
-        },
-        {
-            "id": "8027-clean-process-profile",
-            "description": BUILTIN_RULE_DESCRIPTIONS[
-                "8027-clean-process-profile"
-            ],
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x8027",
-                "length": "*",
-            },
-            "action": "replace_template_nearest",
-            "inherit_live_header": 14,
-            "require_same_device": True,
-        },
-        {
-            "id": "8029-clean-process-location-profile",
-            "description": BUILTIN_RULE_DESCRIPTIONS[
-                "8029-clean-process-location-profile"
-            ],
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x8029",
-                "length": "*",
-            },
-            "action": "replace_template_nearest",
-            "inherit_live_header": 14,
-            "require_same_device": True,
-        },
-        {
-            "id": "9000-clean-installed-target-profile",
-            "description": BUILTIN_RULE_DESCRIPTIONS[
-                "9000-clean-installed-target-profile"
-            ],
-            "enabled": True,
-            "match": {
-                "record_code": "0x0102000A",
-                "message_id": "0x9000",
-                "length": "*",
-            },
-            "action": "empty_2000",
-        },
-    ],
-}
-
-# 1007/1008/1009/100C 在“继承重放设备”模式下本来就由基座保留Live，
-# 在“替换录制设备”模式下则由连接级设备策略统一选取锁定会话模板。
-# 因此它们不再作为无实际改写的显式热规则展示，只保留真正执行专项处理的9条。
-V1233_TFP_CALLED_SPECIAL_RULES_DOCUMENT = deepcopy(
-    V1232_DEVICE_AWARE_SLOT_CLEAN_1_DOCUMENT
-)
-V1233_TFP_CALLED_SPECIAL_RULES_DOCUMENT["revision"] = (
-    "v123.3-tfp-called-special-rules-1"
-)
-V1233_TFP_CALLED_SPECIAL_RULES_DOCUMENT["rules"] = [
-    rule
-    for rule in V1233_TFP_CALLED_SPECIAL_RULES_DOCUMENT["rules"]
-    if rule.get("id") not in {
-        "1007-clean-code-entry-fingerprint",
-        "1008-clean-code-integrity-vector",
-        "1009-clean-measurement-vector",
-        "100C-clean-code-integrity-entry",
-    }
-]
-
-# v1.124 的tfp_called全消息号扫描由Type9基座执行；热规则表沿用9条专项，
-# 修订号用于让未经用户编辑的v1.123.3默认文件自动升级。
-V124_TFP_CALLED_GLOBAL_CLEAN_1_DOCUMENT = deepcopy(
-    V1233_TFP_CALLED_SPECIAL_RULES_DOCUMENT
-)
-V124_TFP_CALLED_GLOBAL_CLEAN_1_DOCUMENT["revision"] = (
-    "v124-tfp-called-global-clean-1"
-)
-
-# v1.125.5 第一阶段：开追踪后跳变的 0x8028/+0x24、0x8002/+0x2C
-# 按 0x0207 方式清零。保留该文档用于自动升级已经生成的旧默认文件。
-V1255_8028_8002_ZERO_1_DOCUMENT = deepcopy(
-    V124_TFP_CALLED_GLOBAL_CLEAN_1_DOCUMENT
-)
-V1255_8028_8002_ZERO_1_DOCUMENT["revision"] = "v125.5-8028-8002-zero-1"
-V1255_8028_8002_ZERO_1_DOCUMENT["rules"] = list(
-    V1255_8028_8002_ZERO_1_DOCUMENT["rules"]
-)
-_DEFAULT_PATCH_LIVE_RULES = [
-    {
-        "id": "8028-zero-write-counter",
-        "description": BUILTIN_RULE_DESCRIPTIONS["8028-zero-write-counter"],
-        "enabled": True,
-        "match": {
-            "record_code": "0x0102000A",
-            "message_id": "0x8028",
-            "length": 40,
-        },
-        "action": "patch_live",
-        "patches": [
-            {
-                "offset": "0x24",
-                "hex": "00000000",
-                "note": "开追踪后跳变的累计，干净样本为0",
-            }
-        ],
-    },
-    {
-        "id": "8002-zero-status-word",
-        "description": BUILTIN_RULE_DESCRIPTIONS["8002-zero-status-word"],
-        "enabled": True,
-        "match": {
-            "record_code": "0x0102000A",
-            "message_id": "0x8002",
-            "length": 56,
-        },
-        "action": "patch_live",
-        "patches": [
-            {
-                "offset": "0x2C",
-                "hex": "00000000",
-                "note": "开追踪后0→3的状态字",
-            }
-        ],
-    },
-]
-_insert_at = next(
-    (
-        index + 1
-        for index, rule in enumerate(V1255_8028_8002_ZERO_1_DOCUMENT["rules"])
-        if rule.get("id") == "2001-zero-behavior-vector"
+# 暗区突围（UAM）专版：删除三角洲内置热规则，仅保留 0x8023 +0x24 监控清零。
+UAM_8023_ZERO_OFFSET24_RULE: dict[str, Any] = {
+    "id": "8023-zero-offset24-status",
+    "description": (
+        "UAM 0x8023 160B 周期叶：+0x24 非零则 patch 为 0；"
+        "已为零则不改写（计入 rule_changed_counts 仅在实际清零时）"
     ),
-    len(V1255_8028_8002_ZERO_1_DOCUMENT["rules"]),
-)
-V1255_8028_8002_ZERO_1_DOCUMENT["rules"][
-    _insert_at:_insert_at
-] = _DEFAULT_PATCH_LIVE_RULES
-
-# v1.123.1 的11条默认，用于识别并自动升级未编辑的旧规则文件。
-V1231_COMPLETE_TELEMETRY_CLEAN_DOCUMENT = deepcopy(
-    V1232_DEVICE_AWARE_SLOT_CLEAN_1_DOCUMENT
-)
-V1231_COMPLETE_TELEMETRY_CLEAN_DOCUMENT["revision"] = (
-    "v123-complete-telemetry-clean-1"
-)
-V1231_COMPLETE_TELEMETRY_CLEAN_DOCUMENT["rules"] = [
-    rule
-    for rule in V1231_COMPLETE_TELEMETRY_CLEAN_DOCUMENT["rules"]
-    if rule.get("id") not in {
-        "1007-clean-code-entry-fingerprint",
-        "100C-clean-code-integrity-entry",
-    }
-]
-for _legacy_rule in V1231_COMPLETE_TELEMETRY_CLEAN_DOCUMENT["rules"]:
-    _legacy_rule.pop("require_same_device", None)
-    if _legacy_rule.get("id") in {
-        "1008-clean-code-integrity-vector",
-        "1009-clean-measurement-vector",
-    }:
-        _legacy_rule["action"] = "replace_template_nearest"
-        _legacy_rule["inherit_live_header"] = 14
-    _legacy_rule["description"] = {
-        "1008-clean-code-integrity-vector": "代码完整性/系统调用指纹：使用最近长度干净模板",
-        "1009-clean-measurement-vector": "周期检测数值向量：使用最近长度干净模板",
-        "100B-clean-uikit-view-tree": "UIKit视图层级摘要：使用最近长度干净模板",
-        "100F-clean-probe-status": "小型探针状态三元组：使用最近长度干净模板",
-        "8027-clean-process-profile": "活动进程/应用枚举：使用最近长度干净模板",
-        "8029-clean-process-location-profile": "进程调用位置、模块/符号/偏移枚举：使用最近长度干净模板",
-    }.get(_legacy_rule.get("id"), _legacy_rule.get("description", ""))
-
-# v123阶段曾由管理页加载的7条完整测试规则。内容保持精确，用于识别未修改
-# 的旧测试文件并升级到当前默认专项；用户自行编辑过的规则文档仍保持原样。
-_LEGACY_COMPLETE_TEST_DESCRIPTIONS = {
-    "0207-zero-anomaly-counters": "疑似异常页/缺页状态：保留Live，清零状态字段及两个已确认计数字段",
-    "2001-zero-behavior-vector": "固定步进状态：保留前0x24字节及步进计数，清零后部20字节行为向量",
-    "2000-clean-module-report": "周期模块检测结果：按长度选择最近的录制模板，并保留Live公共头",
-    "1105-clean-module-enumeration": "周期模块/路径枚举：按长度选择最近的录制模板，并保留Live前36字节",
-    "8027-clean-process-profile": "活动进程/应用枚举：按长度选择最近的录制模板",
-    "8029-clean-process-location-profile": "进程调用位置、模块/符号/偏移枚举：按长度选择最近的录制模板",
-    "9000-clean-installed-target-profile": "命中型安装应用/环境目标项：删除叶子并重建容器、长度及CRC",
-}
-_LEGACY_COMPLETE_TEST_RULE_IDS = set(_LEGACY_COMPLETE_TEST_DESCRIPTIONS)
-LEGACY_V123_COMPLETE_TEST_7_DOCUMENT: dict[str, Any] = {
-    "schema": HOT_RULE_SCHEMA,
-    "revision": "v123-complete-test-0207-2001-1",
-    "rules": [
-        deepcopy(rule)
-        for rule in V1255_8028_8002_ZERO_1_DOCUMENT["rules"]
-        if str(rule.get("id") or "") in _LEGACY_COMPLETE_TEST_RULE_IDS
-    ],
-}
-for _legacy_rule in LEGACY_V123_COMPLETE_TEST_7_DOCUMENT["rules"]:
-    _legacy_rule["description"] = _LEGACY_COMPLETE_TEST_DESCRIPTIONS[
-        str(_legacy_rule["id"])
-    ]
-    if _legacy_rule["id"] == "0207-zero-anomaly-counters":
-        _legacy_rule["patches"][0][
-            "note"
-        ] = "本次封禁样本新增非零状态字段"
-
-# v1.125.6：
-# - 0x0207 没有可用的正常录制叶，出现时直接删叶并重建父容器；
-# - 0x100C 使用同设备录制池中的最近长度模板，保留Live公共头；
-# - 0x8028/0x8002 继续只清零已确认的跳变字段。
-DEFAULT_HOT_RULE_DOCUMENT = deepcopy(V1255_8028_8002_ZERO_1_DOCUMENT)
-DEFAULT_HOT_RULE_DOCUMENT["revision"] = "v125.6-0207-drop-100c-template-1"
-for _default_rule in DEFAULT_HOT_RULE_DOCUMENT["rules"]:
-    if _default_rule.get("id") == "0207-zero-anomaly-counters":
-        _default_rule["description"] = (
-            "异常页/缺页状态：删除整条0x0207叶并重建父容器、长度及CRC"
-        )
-        _default_rule["action"] = "drop_leaf"
-        _default_rule.pop("patches", None)
-
-_100C_RECORDED_TEMPLATE_RULE = {
-    "id": "100C-recorded-code-integrity-entry",
-    "description": "代码入口及完整性指纹：使用同设备录制池最近长度模板",
     "enabled": True,
     "match": {
         "record_code": "0x0102000A",
-        "message_id": "0x100C",
-        "length": "*",
+        "message_id": "0x8023",
+        "length": 160,
     },
-    "action": "replace_template_nearest",
-    "inherit_live_header": 14,
-    "require_same_device": True,
-}
-_100C_insert_at = next(
-    (
-        index + 1
-        for index, rule in enumerate(DEFAULT_HOT_RULE_DOCUMENT["rules"])
-        if rule.get("id") == "100F-clean-probe-status"
-    ),
-    len(DEFAULT_HOT_RULE_DOCUMENT["rules"]),
-)
-DEFAULT_HOT_RULE_DOCUMENT["rules"].insert(
-    _100C_insert_at,
-    _100C_RECORDED_TEMPLATE_RULE,
-)
-
-# 冻结 v1.125.6，用于识别未编辑的旧默认文件并自动升级。
-V1256_0207_DROP_100C_TEMPLATE_1_DOCUMENT = deepcopy(DEFAULT_HOT_RULE_DOCUMENT)
-
-# v1.126.4：默认不再用录制模板替换设备/探针/进程叶。
-# 录制池没有对应叶时跳过替换；drop_leaf / patch_live 仍然生效。
-# 0x1105 仍用录制模板换模块/路径列表，并保留Live前36字节。
-_PASS_LIVE_NO_TEMPLATE_RULE_IDS = {
-    "100B-clean-uikit-view-tree",
-    "100C-recorded-code-integrity-entry",
-    "100F-clean-probe-status",
-    "2000-clean-module-report",
-    "1105-clean-module-enumeration",
-    "8027-clean-process-profile",
-    "8029-clean-process-location-profile",
-}
-_PASS_LIVE_NO_TEMPLATE_DESCRIPTIONS = {
-    "100C-recorded-code-integrity-entry": (
-        "代码入口及完整性指纹：不再用录制模板替换，保留Live"
-    ),
-}
-DEFAULT_HOT_RULE_DOCUMENT["revision"] = "v126.4-drop-patch-only-1"
-for _default_rule in DEFAULT_HOT_RULE_DOCUMENT["rules"]:
-    rule_id = str(_default_rule.get("id") or "")
-    if rule_id not in _PASS_LIVE_NO_TEMPLATE_RULE_IDS:
-        continue
-    _default_rule["action"] = "pass_live"
-    _default_rule.pop("inherit_live_header", None)
-    _default_rule.pop("require_same_device", None)
-    _default_rule.pop("patches", None)
-    _default_rule["description"] = (
-        _PASS_LIVE_NO_TEMPLATE_DESCRIPTIONS.get(rule_id)
-        or BUILTIN_RULE_DESCRIPTIONS.get(rule_id)
-        or _default_rule.get("description", "")
-    )
-
-# 冻结「1105 也被改成 pass_live」的短命默认，便于已写出的文件自动升回模板。
-V1264_DROP_PATCH_ONLY_1_DOCUMENT = deepcopy(DEFAULT_HOT_RULE_DOCUMENT)
-for _default_rule in DEFAULT_HOT_RULE_DOCUMENT["rules"]:
-    if _default_rule.get("id") != "1105-clean-module-enumeration":
-        continue
-    _default_rule["action"] = "replace_template_nearest"
-    _default_rule["inherit_live_header"] = 36
-    _default_rule.pop("require_same_device", None)
-    _default_rule["description"] = (
-        "周期模块/路径枚举：有对应录制叶则用最近长度模板替换0x24后主体，"
-        "保留Live前36字节（头+计数）；没有对应叶则原样通过"
-    )
-DEFAULT_HOT_RULE_DOCUMENT["revision"] = "v126.4-restore-1105-template-1"
-
-# 冻结恢复1105后、100B仍为pass_live的默认，便于已写出的文件自动升级。
-V1264_RESTORE_1105_TEMPLATE_1_DOCUMENT = deepcopy(DEFAULT_HOT_RULE_DOCUMENT)
-for _default_rule in DEFAULT_HOT_RULE_DOCUMENT["rules"]:
-    if _default_rule.get("id") != "100B-clean-uikit-view-tree":
-        continue
-    _default_rule["action"] = "replace_template_nearest"
-    _default_rule["inherit_live_header"] = 14
-    _default_rule.pop("require_same_device", None)
-    _default_rule["allow_cross_device"] = True
-    _default_rule["description"] = (
-        "UIKit视图层级摘要：注入dylib会多一层绘制视图。"
-        "有对应录制叶则无条件用最近长度模板替换，允许跨设备；"
-        "没有对应叶则原样通过"
-    )
-DEFAULT_HOT_RULE_DOCUMENT["revision"] = "v126.4-100b-cross-device-template-1"
-
-# 冻结 12 条含 pass_live 占位的默认，便于已写出的文件自动升到精简 7 条。
-V1264_100B_CROSS_DEVICE_TEMPLATE_1_DOCUMENT = deepcopy(DEFAULT_HOT_RULE_DOCUMENT)
-_MINIMAL_DEFAULT_RULE_IDS = {
-    "0207-zero-anomaly-counters",
-    "2001-zero-behavior-vector",
-    "8028-zero-write-counter",
-    "8002-zero-status-word",
-    "100B-clean-uikit-view-tree",
-    "1105-clean-module-enumeration",
-    "9000-clean-installed-target-profile",
-}
-DEFAULT_HOT_RULE_DOCUMENT["rules"] = [
-    rule
-    for rule in DEFAULT_HOT_RULE_DOCUMENT["rules"]
-    if str(rule.get("id") or "") in _MINIMAL_DEFAULT_RULE_IDS
-]
-DEFAULT_HOT_RULE_DOCUMENT["revision"] = "v126.4-minimal-7-1"
-
-# 冻结精简 7 条，便于已写出的文件自动升回 8027/8029 录制模板。
-V1264_MINIMAL_7_1_DOCUMENT = deepcopy(DEFAULT_HOT_RULE_DOCUMENT)
-_8027_8029_NEAREST_RULE_IDS = (
-    "8027-clean-process-profile",
-    "8029-clean-process-location-profile",
-)
-_8027_8029_NEAREST_DESCRIPTIONS = {
-    "8027-clean-process-profile": (
-        "活动进程/应用枚举：黑名单脏进程先删叶；"
-        "有玩家录制或官方模板则按最近长度替换并保留Live公共头；"
-        "没有对应叶则原样通过"
-    ),
-    "8029-clean-process-location-profile": (
-        "进程调用位置采样：黑名单脏进程先删叶；"
-        "有玩家录制或官方模板则按最近长度替换并保留Live公共头；"
-        "没有对应叶则原样通过"
-    ),
-}
-_8027_8029_insert_at = next(
-    (
-        index
-        for index, rule in enumerate(DEFAULT_HOT_RULE_DOCUMENT["rules"])
-        if rule.get("id") == "9000-clean-installed-target-profile"
-    ),
-    len(DEFAULT_HOT_RULE_DOCUMENT["rules"]),
-)
-for _source_rule in V1264_100B_CROSS_DEVICE_TEMPLATE_1_DOCUMENT["rules"]:
-    rule_id = str(_source_rule.get("id") or "")
-    if rule_id not in _8027_8029_NEAREST_RULE_IDS:
-        continue
-    _restored = deepcopy(_source_rule)
-    _restored["action"] = "replace_template_nearest"
-    _restored["inherit_live_header"] = 14
-    _restored.pop("require_same_device", None)
-    _restored["allow_cross_device"] = True
-    _restored["description"] = _8027_8029_NEAREST_DESCRIPTIONS[rule_id]
-    DEFAULT_HOT_RULE_DOCUMENT["rules"].insert(_8027_8029_insert_at, _restored)
-    _8027_8029_insert_at += 1
-DEFAULT_HOT_RULE_DOCUMENT["revision"] = "v126.5-8027-8029-nearest-1"
-
-# 冻结 9 条（尚无 2000 模板），便于已写出的文件自动升回 2000 nearest。
-V1265_8027_8029_NEAREST_1_DOCUMENT = deepcopy(DEFAULT_HOT_RULE_DOCUMENT)
-_2000_insert_at = next(
-    (
-        index
-        for index, rule in enumerate(DEFAULT_HOT_RULE_DOCUMENT["rules"])
-        if rule.get("id") == "1105-clean-module-enumeration"
-    ),
-    len(DEFAULT_HOT_RULE_DOCUMENT["rules"]),
-)
-_2000_source = next(
-    (
-        deepcopy(rule)
-        for rule in V1264_100B_CROSS_DEVICE_TEMPLATE_1_DOCUMENT["rules"]
-        if rule.get("id") == "2000-clean-module-report"
-    ),
-    {
-        "id": "2000-clean-module-report",
-        "enabled": True,
-        "match": {
-            "record_code": "0x0102000A",
-            "message_id": "0x2000",
-            "length": "*",
-        },
-    },
-)
-_2000_source["action"] = "replace_template_nearest"
-_2000_source["inherit_live_header"] = 14
-_2000_source.pop("require_same_device", None)
-_2000_source.pop("allow_cross_device", None)
-_2000_source["no_template"] = "drop_leaf"
-_2000_source["description"] = (
-    "周期模块检测结果：有玩家录制或官方模板则按最近长度替换并保留Live公共头；"
-    "没有对应叶则删叶"
-)
-DEFAULT_HOT_RULE_DOCUMENT["rules"].insert(_2000_insert_at, _2000_source)
-DEFAULT_HOT_RULE_DOCUMENT["revision"] = "v126.5-2000-nearest-drop-1"
-
-# 冻结 v1.126.5 最终默认，便于已经落盘的未编辑规则在启动时
-# 自动升级。v1.126.7 恢复 0x0207 的等长字段清零：保留整条Live叶、
-# recordSequence 和父容器形状，避免 drop_leaf 造成消息缺失与序号空洞。
-V1265_2000_NEAREST_DROP_1_DOCUMENT = deepcopy(DEFAULT_HOT_RULE_DOCUMENT)
-for _default_rule in DEFAULT_HOT_RULE_DOCUMENT["rules"]:
-    if _default_rule.get("id") != "0207-zero-anomaly-counters":
-        continue
-    _default_rule["description"] = (
-        "疑似异常页/缺页状态：保留完整Live叶，仅清零+0x48与+0x50字段"
-    )
-    _default_rule["action"] = "patch_live"
-    _default_rule.pop("inherit_live_header", None)
-    _default_rule.pop("require_same_device", None)
-    _default_rule.pop("allow_cross_device", None)
-    _default_rule.pop("no_template", None)
-    _default_rule["patches"] = [
+    "action": "patch_live",
+    "patches": [
         {
-            "offset": "0x48",
+            "offset": "0x24",
             "hex": "00000000",
-            "note": "body+0x28",
-        },
-        {
-            "offset": "0x50",
-            "hex": "00000000",
-            "note": "body+0x30",
-        },
-    ]
-DEFAULT_HOT_RULE_DOCUMENT["revision"] = "v126.7-0207-patch-live-1"
+            "skip_if_zero": True,
+            "note": "UAM v1.131.2 +0x24 状态候选字段",
+        }
+    ],
+}
+UAM_DEFAULT_HOT_RULE_DOCUMENT: dict[str, Any] = {
+    "schema": HOT_RULE_SCHEMA,
+    "revision": "uam-v1.131.2-8023-zero-offset24-1",
+    "rules": [deepcopy(UAM_8023_ZERO_OFFSET24_RULE)],
+}
 
-# 冻结 v1.126.7。126.6 封禁样本回溯确认：录制输入叶序号全部连续，
-# 唯一整叶删除把 3320..3326 改成缺少 3325；同时样本中存在56条完全一致
-# （仅recordSequence不同）的44字节0x2000空结果叶，51条为批次子叶、5条为
-# 根叶。因此内置抑制不再制造序号空洞，9000及2000缺模板均写成该空结果叶。
-V1267_0207_PATCH_LIVE_1_DOCUMENT = deepcopy(DEFAULT_HOT_RULE_DOCUMENT)
-for _default_rule in DEFAULT_HOT_RULE_DOCUMENT["rules"]:
-    if _default_rule.get("id") == "9000-clean-installed-target-profile":
-        _default_rule["description"] = (
-            "命中型安装应用/环境目标项：改成真实44字节空结果0x2000，保留Live序号"
-        )
-        _default_rule["action"] = "empty_2000"
-        _default_rule.pop("patches", None)
-    elif _default_rule.get("id") == "2000-clean-module-report":
-        _default_rule["description"] = (
-            "周期模块检测结果：有模板则最近长度替换；无模板则改成真实44字节空结果0x2000并保留Live序号"
-        )
-        _default_rule["no_template"] = "empty_2000"
-DEFAULT_HOT_RULE_DOCUMENT["revision"] = "v126.8-sequence-safe-empty-2000-1"
 
-# v1.127.0 正式采用126.6封禁样本回溯出的保序策略。冻结126.8候选规则，
-# 使已经落盘的候选版在启动时自动迁移到127正式版。
-V1268_SEQUENCE_SAFE_EMPTY_2000_1_DOCUMENT = deepcopy(
-    DEFAULT_HOT_RULE_DOCUMENT
-)
-DEFAULT_HOT_RULE_DOCUMENT["revision"] = "v127.0-sequence-safe-empty-2000-1"
+DEFAULT_HOT_RULE_DOCUMENT = UAM_DEFAULT_HOT_RULE_DOCUMENT
 
-# v1.128.2：历史124/125数据回溯确认+0x44/+0x4C是正常递增计数；
-# 异常页/缺页字段仍位于叶原始偏移+0x48/+0x50。等长patch_live
-# 保留叶、父容器及recordSequence，同时保留v1.128.1的DROP_LEAF保序压紧。
-V127_SEQUENCE_SAFE_EMPTY_2000_1_DOCUMENT = deepcopy(DEFAULT_HOT_RULE_DOCUMENT)
-for _default_rule in DEFAULT_HOT_RULE_DOCUMENT["rules"]:
-    if _default_rule.get("id") != "0207-zero-anomaly-counters":
-        continue
-    _default_rule["description"] = (
-        "疑似异常页/缺页状态：保留完整Live叶，仅清零+0x48与+0x50字段"
-    )
-    _default_rule["action"] = "patch_live"
-    _default_rule["patches"] = [
-        {
-            "offset": "0x48",
-            "hex": "00000000",
-            "note": "body+0x28",
-        },
-        {
-            "offset": "0x50",
-            "hex": "00000000",
-            "note": "body+0x30",
-        },
-    ]
-DEFAULT_HOT_RULE_DOCUMENT["revision"] = "v128.2-0207-4850-compact-ai-log-1"
-
-# 代码内专项处理器继续保留，便于单元测试和极少数需要代码语义的规则。
 SPECIAL_UNKNOWN_LEAF_HANDLERS: dict[LeafKey, tuple[str, LeafHandler]] = {}
 
 
@@ -945,7 +193,7 @@ def validate_hot_rule_document(document: Mapping[str, Any]) -> tuple[dict, list[
     if not isinstance(document, Mapping):
         raise HotRuleValidationError("document must be an object")
     schema = str(document.get("schema") or HOT_RULE_SCHEMA)
-    if schema != HOT_RULE_SCHEMA:
+    if schema not in SUPPORTED_HOT_RULE_SCHEMAS:
         raise HotRuleValidationError(f"unsupported schema: {schema}")
     raw_rules = document.get("rules")
     if not isinstance(raw_rules, list):
@@ -969,7 +217,7 @@ def validate_hot_rule_document(document: Mapping[str, Any]) -> tuple[dict, list[
         seen_ids.add(rule_id)
         description = str(
             raw_rule.get("description")
-            or BUILTIN_RULE_DESCRIPTIONS.get(rule_id, "")
+            or RULE_DESCRIPTIONS.get(rule_id, "")
         ).strip()
         if len(description) > 256:
             raise HotRuleValidationError(
@@ -1097,11 +345,22 @@ def validate_hot_rule_document(document: Mapping[str, Any]) -> tuple[dict, list[
                 expect = _parse_hex(raw_patch.get("expect_hex"), field=f"{pp}.expect_hex")
                 if len(expect) != len(value):
                     raise HotRuleValidationError(f"{pp}.expect_hex: length mismatch")
+            skip_if_zero = bool(raw_patch.get("skip_if_zero", False))
             note = str(raw_patch.get("note") or "")
-            patches.append({"offset": offset, "value": value, "expect": expect, "note": note})
+            patches.append(
+                {
+                    "offset": offset,
+                    "value": value,
+                    "expect": expect,
+                    "skip_if_zero": skip_if_zero,
+                    "note": note,
+                }
+            )
             item = {"offset": offset, "hex": value.hex().upper()}
             if expect is not None:
                 item["expect_hex"] = expect.hex().upper()
+            if skip_if_zero:
+                item["skip_if_zero"] = True
             if note:
                 item["note"] = note
             normalized_patches.append(item)
@@ -1163,7 +422,6 @@ class Type9HotRuleStore:
         default_document: Mapping[str, Any] | None = None,
         managed_previous_defaults: tuple[Mapping[str, Any], ...] = (),
         auto_reload_interval: float = 1.0,
-        force_builtin_0207_patch_live: bool = False,
     ):
         self.path = path
         self.default_document = deepcopy(default_document) if default_document else None
@@ -1171,9 +429,6 @@ class Type9HotRuleStore:
             deepcopy(document) for document in managed_previous_defaults
         )
         self.auto_reload_interval = max(0.0, float(auto_reload_interval))
-        self.force_builtin_0207_patch_live = bool(
-            force_builtin_0207_patch_live
-        )
         self._lock = threading.RLock()
         self._document = {"schema": HOT_RULE_SCHEMA, "revision": "", "rules": []}
         self._rules_by_key: dict[RuleKey, dict] = {}
@@ -1187,10 +442,7 @@ class Type9HotRuleStore:
         self._changed_counts: dict[str, int] = {}
 
     def _apply_runtime_policy(self, document: Mapping[str, Any]) -> dict:
-        """Keep the built-in 0x0207 contract stable across persisted hot rules."""
-        output = deepcopy(document)
-        if not self.force_builtin_0207_patch_live:
-            return output
+        return deepcopy(document)
         changed = False
         rules = output.get("rules") or []
         desired = next(
@@ -1492,33 +744,13 @@ class Type9HotRuleStore:
             }
 
 
+
 type9_hot_rule_store = Type9HotRuleStore(
     HOT_RULES_FILE,
     default_document=DEFAULT_HOT_RULE_DOCUMENT,
-    managed_previous_defaults=(
-        LEGACY_V122_DEFAULT_HOT_RULE_DOCUMENT,
-        V123_SAFE_REPLAY_1_DOCUMENT,
-        V123_SAFE_REPLAY_2_DOCUMENT,
-        V123_SAFE_REPLAY_3_DOCUMENT,
-        LEGACY_V123_COMPLETE_TEST_7_DOCUMENT,
-        V1231_COMPLETE_TELEMETRY_CLEAN_DOCUMENT,
-        V1232_DEVICE_AWARE_SLOT_CLEAN_1_DOCUMENT,
-        V1233_TFP_CALLED_SPECIAL_RULES_DOCUMENT,
-        V124_TFP_CALLED_GLOBAL_CLEAN_1_DOCUMENT,
-        V1255_8028_8002_ZERO_1_DOCUMENT,
-        V1256_0207_DROP_100C_TEMPLATE_1_DOCUMENT,
-        V1264_DROP_PATCH_ONLY_1_DOCUMENT,
-        V1264_RESTORE_1105_TEMPLATE_1_DOCUMENT,
-        V1264_100B_CROSS_DEVICE_TEMPLATE_1_DOCUMENT,
-        V1264_MINIMAL_7_1_DOCUMENT,
-        V1265_8027_8029_NEAREST_1_DOCUMENT,
-        V1265_2000_NEAREST_DROP_1_DOCUMENT,
-        V1267_0207_PATCH_LIVE_1_DOCUMENT,
-        V1268_SEQUENCE_SAFE_EMPTY_2000_1_DOCUMENT,
-        V127_SEQUENCE_SAFE_EMPTY_2000_1_DOCUMENT,
-    ),
-    force_builtin_0207_patch_live=True,
+    managed_previous_defaults=(),
 )
+
 
 
 def _apply_compiled_rule(
@@ -1603,8 +835,11 @@ def _apply_compiled_rule(
     for patch in rule.get("patches") or []:
         offset = int(patch["offset"])
         value = bytes(patch["value"])
+        current = bytes(candidate[offset:offset + len(value)])
+        if patch.get("skip_if_zero") and current == b"\x00" * len(value):
+            continue
         expect = patch.get("expect")
-        if expect is not None and bytes(candidate[offset:offset + len(value)]) != bytes(expect):
+        if expect is not None and current != bytes(expect):
             return {
                 "action": "PASS_LIVE",
                 "raw": raw,

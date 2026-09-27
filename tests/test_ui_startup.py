@@ -193,7 +193,7 @@ class MainWindowStartupTests(unittest.TestCase):
             )
             self.assertIn("active=", window.lbl_type9_rule_status.text())
             self.assertIn(APP_VERSION, window.windowTitle())
-            self.assertEqual(APP_VERSION, "v1.131.2")
+            self.assertEqual(APP_VERSION, "v1.132.0")
             self.assertEqual(
                 window._format_replay_progress_text(30, 0, 0, 0),
                 "30/-",

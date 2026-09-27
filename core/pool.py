@@ -18,7 +18,7 @@ from core.crypto import (
     _parse_ace_account_id,
 )
 from core.traffic_session_log import traffic_file_logger
-from core.dfm_message_catalog import (
+from core.uam_message_catalog import (
     message_observation_details_from_item,
     summarize_message_observations,
 )
