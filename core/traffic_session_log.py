@@ -1338,7 +1338,7 @@ class TrafficSessionLog:
                     checks["blue_12_25_inherited"] = of[18:38] == lf[18:38]
                     checks["blue_2f_inherited"] = len(of) > 47 and len(lf) > 47 and of[47] == lf[47]
                 event = {
-                    "schema": "dfm-01-replay-v6",
+                    "schema": "uam-01-replay-v6",
                     "event_id": cls._analysis_01_event_id,
                     "time": datetime.now().isoformat(timespec="milliseconds"),
                     "decision": decision,
