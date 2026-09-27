@@ -477,7 +477,7 @@ class Persistent01RecordLogTests(unittest.TestCase):
         self.assertIsNotNone(run_dir)
         with open(os.path.join(run_dir, "manifest.json"), "r", encoding="utf-8") as f:
             manifest = json.load(f)
-        self.assertEqual(manifest["schema"], "dfm-01-replay-v6")
+        self.assertEqual(manifest["schema"], "uam-01-replay-v6")
         self.assertEqual(manifest["learning_mode"], "118-tiered-pass-live")
         self.assertIn(
             "mechanically verified", manifest["source_map"]["network_output"]
@@ -614,7 +614,7 @@ class Persistent01RecordLogTests(unittest.TestCase):
         with open(path, "r", encoding="utf-8") as stream:
             event = json.loads(stream.readline())
         self.assertEqual(event["decision"], "REPLACE")
-        self.assertEqual(event["schema"], "dfm-01-replay-v6")
+        self.assertEqual(event["schema"], "uam-01-replay-v6")
         self.assertEqual(event["replacement_level"], "KNOWN_CLEAN")
         self.assertFalse(event["checks"]["final_equals_live"])
         self.assertTrue(event["checks"]["final_equals_shadow"])

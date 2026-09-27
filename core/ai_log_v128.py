@@ -25,7 +25,7 @@ GROUP_SCHEMA = "dfm-ai-01-group-v1"
 LEAF_SCHEMA = "dfm-ai-01-leaf-v1"
 CONTROL_EVENT_SCHEMA = "dfm-ai-control-event-v129-v1"
 CONTROL_AUDIT_REVISION = "v129-operation-state-audit-r1"
-APP_RELEASE_VERSION = "v1.131.2"
+APP_RELEASE_VERSION = "v1.132.0"
 
 
 def _now() -> tuple[str, int]:
