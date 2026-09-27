@@ -70,7 +70,7 @@ class V128AiLogTests(unittest.TestCase):
         with open(os.path.join(run_dir, "manifest.json"), encoding="utf-8") as stream:
             manifest = json.load(stream)
         self.assertEqual(manifest["schema"], "dfm-ai-log-manifest-v1")
-        self.assertEqual(manifest["app_version"], "v1.132.0")
+        self.assertEqual(manifest["app_version"], "v1.132.2")
         self.assertEqual(manifest["record_format"], "jsonl-one-object-per-line")
         self.assertIn("v128_model_revision", manifest)
         self.assertEqual(

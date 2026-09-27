@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QObject, QDate, QTimer, QUrl, QEvent
 from PySide6.QtGui import QColor, QFont, QTextCursor, QDesktopServices
 
-APP_VERSION = "v1.132.0"
+APP_VERSION = "v1.132.2"
 
 from core.config import app_config, DATA_DIR, CONFIG_FILE
 from core.edition import APP_DISPLAY_NAME
@@ -1663,7 +1663,7 @@ class MainWindow(QMainWindow):
         type9_rule_bar.addWidget(self.btn_type9_rule_reload)
         self.btn_type9_rule_clear_stats = QPushButton("🧹 清空统计")
         self.btn_type9_rule_clear_stats.setToolTip(
-            "一键清零热规则和tfp_called内置规则的全部成功改写次数，不影响当前规则配置。"
+            "清零热规则与 8418 内置黑名单的成功改写次数。"
         )
         self.btn_type9_rule_clear_stats.clicked.connect(
             self._on_type9_rule_clear_stats
@@ -1693,7 +1693,7 @@ class MainWindow(QMainWindow):
         type9_rule_v.addWidget(self.type9_rule_table, 1)
 
         type9_rule_hint = QLabel(
-            "规则文件描述普通热规则；tfp_called与内容黑名单删叶作为内置规则显示并统计。"
+            "UAM 共两条：热规则 8023 +0x24 清零；内置 0x8418 黑名单→0x8306 替换。"
         )
         type9_rule_hint.setStyleSheet("color:#6b7280; font-size:10px;")
         type9_rule_v.addWidget(type9_rule_hint)

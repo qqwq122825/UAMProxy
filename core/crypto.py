@@ -1793,11 +1793,13 @@ def _ace_try_replay_template(
                 and leaf.get("candidate_hex") != leaf.get("live_hex")
             ):
                 type9_hot_rule_store.record_changed(rule_id)
-            if (
-                leaf.get("content_blacklist_hit")
-                and leaf.get("special_rule_action")
-                in {"DROP_LEAF", "REPLACE_CLEAN_2000"}
-            ):
+            if leaf.get("content_blacklist_hit") and leaf.get(
+                "special_rule_action"
+            ) in {
+                "DROP_LEAF",
+                "REPLACE_CLEAN_2000",
+                "REPLACE_VARIABLE_LENGTH",
+            }:
                 type9_hot_rule_store.record_changed(
                     str(leaf.get("special_rule_id") or CONTENT_BLACKLIST_RULE_ID)
                 )

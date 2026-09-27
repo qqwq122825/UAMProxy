@@ -20,6 +20,7 @@ from core.type9_shadow import (
     template_leaf_rows,
 )
 from core.type9_special_rules import type9_hot_rule_store
+from tests.skip_dfm_legacy import skip_unless_dfm_type9_legacy_intercepts
 
 
 class _NoHotRules:
@@ -504,6 +505,7 @@ class Type9OnlineTests(unittest.TestCase):
             "iPhone18,2",
         )
 
+    @skip_unless_dfm_type9_legacy_intercepts
     def test_v1232_tfp_called_uses_clean_semantic_slot_and_live_device(self):
         recorded_leaf = _telemetry_leaf(
             13,
@@ -550,6 +552,7 @@ class Type9OnlineTests(unittest.TestCase):
             "CROSS_RECORD_SLOT_REPLACE",
         )
 
+    @skip_unless_dfm_type9_legacy_intercepts
     def test_v1232_tfp_called_on_1122329_uses_nearest_clean_slot(self):
         recorded_leaf = _telemetry_leaf(
             21,
@@ -607,6 +610,7 @@ class Type9OnlineTests(unittest.TestCase):
             {"inc_id", "obf_id"},
         )
 
+    @skip_unless_dfm_type9_legacy_intercepts
     def test_v1233_tfp_called_without_template_uses_structured_remove(self):
         body = (
             b"model:iPad13,4;ver:14.60;inc_id:14;obf_id:14\x00"
@@ -663,6 +667,7 @@ class Type9OnlineTests(unittest.TestCase):
             result["tfp_called_remove_info"]["removed_length"], 20
         )
 
+    @skip_unless_dfm_type9_legacy_intercepts
     def test_v124_confirmed_1122358_uses_clean_template(self):
         recorded_leaf = _telemetry_leaf(
             23,
@@ -715,6 +720,7 @@ class Type9OnlineTests(unittest.TestCase):
             result["tfp_called_replacement"]["candidate_marker_present"]
         )
 
+    @skip_unless_dfm_type9_legacy_intercepts
     def test_v124_unseen_record_code_uses_generic_clean_template(self):
         recorded_leaf = _telemetry_leaf(
             23,
@@ -750,6 +756,7 @@ class Type9OnlineTests(unittest.TestCase):
             "v124-tfp-called-any-record-clean-slot",
         )
 
+    @skip_unless_dfm_type9_legacy_intercepts
     def test_v124_tfp_called_on_new_record_without_template_removes_field(self):
         body = (
             b"model:iPad13,4;ver:14.60;inc_id:13;obf_id:13\x00"
@@ -792,6 +799,7 @@ class Type9OnlineTests(unittest.TestCase):
             result["tfp_called_action"], "STRUCTURED_FIELD_REMOVE"
         )
 
+    @skip_unless_dfm_type9_legacy_intercepts
     def test_v124_tfp_called_unknown_layout_uses_zero_marker_fallback(self):
         live_leaf = _telemetry_leaf(
             923,
@@ -826,6 +834,7 @@ class Type9OnlineTests(unittest.TestCase):
         )
         self.assertEqual(result["tfp_called_action"], "ZERO_MARKER")
 
+    @skip_unless_dfm_type9_legacy_intercepts
     def test_v1233_tfp_structured_remove_passes_full_01_crc_gate(self):
         type9_hot_rule_store.clear_changed_counts()
         body = (

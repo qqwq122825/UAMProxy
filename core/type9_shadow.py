@@ -15,6 +15,11 @@ import zlib
 from core.type9_content_blacklist import (
     CONTENT_BLACKLIST_RULE_ID,
     scan_type9_content_blacklist,
+    uam_clean_8306_leaf,
+)
+from core.edition import (
+    type9_legacy_builtin_intercepts_enabled,
+    type9_uam_content_blacklist_enabled,
 )
 from core.type9_crypto import KEYS, find_records, type9_transform
 from core.type9_special_rules import (
@@ -139,7 +144,7 @@ TFP_CALLED_STRUCTURED_REMOVE_RULE_ID = (
     "v124-tfp-called-no-template-structured-remove"
 )
 TFP_CALLED_ZERO_MARKER_RULE_ID = "v124-tfp-called-unknown-layout-zero-marker"
-TFP_CALLED_INTERCEPT_RULE_ROWS = (
+_DFM_TFP_CALLED_INTERCEPT_RULE_ROWS = (
     {
         "id": "1122329-tfp-called-clean-slot",
         "description": "0x01122329命中tfp_called后使用干净语义槽",
@@ -176,6 +181,12 @@ TFP_CALLED_INTERCEPT_RULE_ROWS = (
         "record_code": "*",
         "action": "zero_marker",
     },
+)
+
+TFP_CALLED_INTERCEPT_RULE_ROWS = (
+    _DFM_TFP_CALLED_INTERCEPT_RULE_ROWS
+    if type9_legacy_builtin_intercepts_enabled()
+    else ()
 )
 
 # 这些消息正文包含代码地址、系统函数序言或与OS二进制相关的指纹。
@@ -1094,12 +1105,21 @@ def build_shadow_logical(
         if hot_action == "replace_template_nearest":
             candidates = list(identity_rows.get(identity_key) or [])
         live_record_code = int(live_leaf["record_code"])
+        legacy_builtin_intercepts = type9_legacy_builtin_intercepts_enabled()
         tfp_called_marker_hit = (
-            _TFP_CALLED_MARKER in bytes(live_leaf["raw"])
+            legacy_builtin_intercepts
+            and _TFP_CALLED_MARKER in bytes(live_leaf["raw"])
         )
-        content_blacklist_hit = scan_type9_content_blacklist(
-            bytes(live_leaf["raw"])
-        )
+        content_blacklist_hit = None
+        if legacy_builtin_intercepts:
+            content_blacklist_hit = scan_type9_content_blacklist(
+                bytes(live_leaf["raw"])
+            )
+        elif type9_uam_content_blacklist_enabled():
+            content_blacklist_hit = scan_type9_content_blacklist(
+                bytes(live_leaf["raw"]),
+                message_id=int(live_leaf.get("message_id") or 0),
+            )
         cross_slot_rule = CONFIRMED_CROSS_RECORD_SLOT_RULES.get(
             live_record_code
         )
@@ -1266,17 +1286,43 @@ def build_shadow_logical(
                 )
             sequence_distance = abs(int(selected["record_sequence"]) - sequence)
             selected_raw = bytes(selected["raw"])
+        if content_blacklist_hit:
+            replace_kind = str(content_blacklist_hit.get("replace_kind") or "")
+            rule_id = str(
+                content_blacklist_hit.get("rule_id") or CONTENT_BLACKLIST_RULE_ID
+            )
+            if replace_kind == "uam_8306":
+                version = 1
+                if len(live_leaf["raw"]) >= 4:
+                    version = int.from_bytes(live_leaf["raw"][0:4], "big")
+                blacklist_decision = {
+                    "action": "REPLACE_VARIABLE_LENGTH",
+                    "rule_id": rule_id,
+                    "raw": uam_clean_8306_leaf(
+                        int(live_leaf["record_sequence"]),
+                        version=version,
+                    ),
+                    "changed": True,
+                    "matched_rule": True,
+                    "hot_action": "replace_8306",
+                    "blacklist_token": content_blacklist_hit["token"],
+                    "blacklist_encoding": content_blacklist_hit["encoding"],
+                }
+            else:
+                blacklist_decision = {
+                    "action": "REPLACE_CLEAN_2000",
+                    "rule_id": rule_id,
+                    "raw": bytes(live_leaf["raw"]),
+                    "changed": True,
+                    "matched_rule": True,
+                    "hot_action": "empty_2000",
+                    "blacklist_token": content_blacklist_hit["token"],
+                    "blacklist_encoding": content_blacklist_hit["encoding"],
+                }
+        else:
+            blacklist_decision = None
         special_decision = (
-            {
-                "action": "REPLACE_CLEAN_2000",
-                "rule_id": CONTENT_BLACKLIST_RULE_ID,
-                "raw": bytes(live_leaf["raw"]),
-                "changed": True,
-                "matched_rule": True,
-                "hot_action": "empty_2000",
-                "blacklist_token": content_blacklist_hit["token"],
-                "blacklist_encoding": content_blacklist_hit["encoding"],
-            }
+            blacklist_decision
             if content_blacklist_hit
             else {
                 "action": "PASS_LIVE",
@@ -1444,6 +1490,7 @@ def build_shadow_logical(
                         "replace_template": "SPECIAL_REPLACE_TEMPLATE",
                         "replace_template_nearest": "SPECIAL_REPLACE_TEMPLATE_NEAREST",
                         "empty_2000": "SPECIAL_EMPTY_2000",
+                        "replace_8306": "SPECIAL_REPLACE_UAM_8306",
                     }.get(hot_action, "SPECIAL_UNKNOWN_RULE")
                     if special_raw != live_leaf["raw"]:
                         changed += 1
@@ -1458,6 +1505,20 @@ def build_shadow_logical(
                                 str(content_blacklist_hit.get("token") or "")
                             )
                             suspect_flags.append("CONTENT_BLACKLIST_EMPTY_2000")
+                    elif (
+                        special_action == "REPLACE_VARIABLE_LENGTH"
+                        and content_blacklist_hit
+                        and str(content_blacklist_hit.get("replace_kind") or "")
+                        == "uam_8306"
+                    ):
+                        special_emptied += 1
+                        block_reason = "SPECIAL_UAM_8306_KEEP_SEQUENCE"
+                        suspect_flags.append("SPECIAL_UAM_8306")
+                        content_blacklist_emptied += 1
+                        content_blacklist_tokens.add(
+                            str(content_blacklist_hit.get("token") or "")
+                        )
+                        suspect_flags.append("CONTENT_BLACKLIST_REPLACE_8306")
                 else:
                     if (
                         special_decision.get("error")

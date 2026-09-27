@@ -10,6 +10,8 @@ from core.crypto import (
 )
 from core.type9_content_blacklist import (
     CONTENT_BLACKLIST_RULE_ID,
+    UAM_CONTENT_BLACKLIST_RULE_ID,
+    UAM_PROCESS_REPORT_MESSAGE_ID,
     scan_type9_content_blacklist,
     xor_b6,
 )
@@ -20,6 +22,7 @@ from core.type9_shadow import (
     template_leaf_rows,
 )
 from core.type9_special_rules import Type9HotRuleStore
+from tests.skip_dfm_legacy import skip_unless_dfm_type9_legacy_intercepts
 from tests.test_type9_hot_rules import (
     batch,
     batch_children,
@@ -57,18 +60,40 @@ class Type9ContentBlacklistTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_scan_hits_xor_b6_and_plain_and_chinese(self):
-        xor_hit = scan_type9_content_blacklist(xor_b6(b"mtxdfm"))
-        self.assertEqual(xor_hit["token"], "mtxdfm")
+        xor_hit = scan_type9_content_blacklist(
+            xor_b6(b"mtxuam"),
+            message_id=UAM_PROCESS_REPORT_MESSAGE_ID,
+        )
+        self.assertEqual(xor_hit["token"], "mtxuam")
         self.assertEqual(xor_hit["encoding"], "xor_b6")
+        self.assertEqual(xor_hit["replace_kind"], "uam_8306")
 
-        bundle_hit = scan_type9_content_blacklist(b"xxcom.mtx.mtxdfmxx")
-        self.assertEqual(bundle_hit["token"], "com.mtx.mtxdfm")
+        bundle_hit = scan_type9_content_blacklist(
+            b"xxcom.mtx.mtxuamxx",
+            message_id=UAM_PROCESS_REPORT_MESSAGE_ID,
+        )
+        self.assertEqual(bundle_hit["token"], "com.mtx.mtxuam")
         self.assertEqual(bundle_hit["encoding"], "plain")
 
-        chinese_hit = scan_type9_content_blacklist(xor_b6("多巴胺".encode("utf-8")))
+        chinese_hit = scan_type9_content_blacklist(
+            xor_b6("多巴胺".encode("utf-8")),
+            message_id=UAM_PROCESS_REPORT_MESSAGE_ID,
+        )
         self.assertEqual(chinese_hit["token"], "多巴胺")
-        self.assertIsNone(scan_type9_content_blacklist(b"SpringBoard"))
+        self.assertIsNone(
+            scan_type9_content_blacklist(
+                b"SpringBoard",
+                message_id=UAM_PROCESS_REPORT_MESSAGE_ID,
+            )
+        )
+        self.assertIsNone(
+            scan_type9_content_blacklist(
+                xor_b6(b"mtxuam"),
+                message_id=0x8027,
+            )
+        )
 
+    @skip_unless_dfm_type9_legacy_intercepts
     def test_drop_8027_mtxdfm_leaf_keeps_clean_sibling(self):
         self.store.replace_document(nearest_document(0x8027))
         clean_template = leaf(100, fill=0x11, message_id=0x8027, length=110)
@@ -116,6 +141,7 @@ class Type9ContentBlacklistTests(unittest.TestCase):
         self.assertEqual(drop_result["content_blacklist_token"], "mtxdfm")
         self.assertEqual(drop_result["content_blacklist_encoding"], "xor_b6")
 
+    @skip_unless_dfm_type9_legacy_intercepts
     def test_blacklist_beats_8027_template_replace(self):
         self.store.replace_document(nearest_document(0x8027))
         clean_template = leaf(100, fill=0x11, message_id=0x8027, length=160)
@@ -140,6 +166,7 @@ class Type9ContentBlacklistTests(unittest.TestCase):
         self.assertEqual([row["message_id"] for row in decoded["leaves"]], [0x2000])
         self.assertEqual(decoded["leaves"][0]["record_sequence"], 901)
 
+    @skip_unless_dfm_type9_legacy_intercepts
     def test_root_leaf_blacklist_becomes_clean_2000(self):
         dirty_root = leaf_with_body_text(
             901,
@@ -181,6 +208,7 @@ class Type9ContentBlacklistTests(unittest.TestCase):
             scan_type9_content_blacklist(decoded["root"]["raw"])
         )
 
+    @skip_unless_dfm_type9_legacy_intercepts
     def test_online_replay_drops_filza_and_rebuilds_container(self):
         self.store.replace_document(nearest_document(0x8027))
         clean_sibling = leaf(100, fill=0x11, message_id=0x8027, length=110)
@@ -237,6 +265,7 @@ class Type9ContentBlacklistTests(unittest.TestCase):
             1,
         )
 
+    @skip_unless_dfm_type9_legacy_intercepts
     def test_chinese_troll_token_drops_9000_style_leaf(self):
         dirty = leaf_with_body_text(
             901, message_id=0x9000, text="巨魔", xor_encode=True, length=96
@@ -261,6 +290,78 @@ class Type9ContentBlacklistTests(unittest.TestCase):
         self.assertEqual(
             [row["record_sequence"] for row in decoded["leaves"]],
             [900, 901],
+        )
+
+    def test_uam_edition_does_not_apply_empty_2000_blacklist_rewrite(self):
+        raw = xor_b6(b"mtxuam") + b"\x00" * 120
+        self.assertIsNotNone(
+            scan_type9_content_blacklist(
+                raw, message_id=UAM_PROCESS_REPORT_MESSAGE_ID
+            )
+        )
+        dirty_live = leaf_with_body_text(
+            901, message_id=0x8027, text="mtxuam", xor_encode=True, length=160
+        )
+        clean_template = leaf(100, fill=0x11, message_id=0x8027, length=110)
+        rows = template_leaf_rows(
+            type9_payload(batch(99, clean_template)), pool_idx=0
+        )["rows"]
+
+        rebuilt = build_shadow_logical(
+            type9_payload(batch_children(899, dirty_live)),
+            rows,
+            special_rule_store=self.store,
+        )
+
+        self.assertEqual(rebuilt.get("content_blacklist_emptied_leaves"), 0)
+        self.assertEqual(rebuilt.get("content_blacklist_dropped_leaves"), 0)
+        for row in rebuilt.get("leaf_results") or []:
+            self.assertFalse(row.get("content_blacklist_hit"))
+            self.assertNotEqual(
+                row.get("special_rule_action"), "REPLACE_CLEAN_2000"
+            )
+
+    def test_uam_8418_mtxuam_replaced_with_8306(self):
+        clean_sibling = leaf(900, fill=0x11, message_id=0x8023, length=160)
+        dirty_live = leaf_with_body_text(
+            901,
+            message_id=0x8418,
+            text="mtxuam",
+            xor_encode=True,
+            length=138,
+        )
+        rows = template_leaf_rows(
+            type9_payload(batch(99, clean_sibling)), pool_idx=0
+        )["rows"]
+
+        rebuilt = build_shadow_logical(
+            type9_payload(batch_children(899, clean_sibling, dirty_live)),
+            rows,
+            special_rule_store=self.store,
+        )
+
+        self.assertTrue(rebuilt["generated"])
+        self.assertEqual(rebuilt["content_blacklist_emptied_leaves"], 1)
+        self.assertEqual(rebuilt["content_blacklist_tokens"], ["mtxuam"])
+        decoded = decode_material(rebuilt["candidate_logical"])
+        self.assertEqual(
+            [row["message_id"] for row in decoded["leaves"]],
+            [0x8023, 0x8306],
+        )
+        self.assertEqual(
+            [row["record_sequence"] for row in decoded["leaves"]],
+            [900, 901],
+        )
+        drop_result = next(
+            row for row in rebuilt["leaf_results"] if row["content_blacklist_hit"]
+        )
+        self.assertEqual(drop_result["message_id"], 0x8418)
+        self.assertEqual(drop_result["special_rule_id"], UAM_CONTENT_BLACKLIST_RULE_ID)
+        self.assertEqual(
+            drop_result["special_rule_action"], "REPLACE_VARIABLE_LENGTH"
+        )
+        self.assertEqual(
+            drop_result["replacement_level"], "SPECIAL_REPLACE_UAM_8306"
         )
 
 

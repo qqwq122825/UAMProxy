@@ -12,13 +12,20 @@ LEGACY_GAME_RUNTIME_ENABLED = False
 LEGACY_GAME_UI_VISIBLE = False
 # 本地文件重放属于通用代理能力，专版继续启用。
 LEGACY_LOCAL_MAP_RUNTIME_ENABLED = True
-# v1.124：支持继承重放设备/替换录制设备两种连接级模式；
-# tfp_called对全部Type9叶子扫描，优先使用干净模板，无模板时删除已确认
-# 结构字段，未知布局最终等长清零，并记录规则ID与替换统计。
 # 暗区 3366 走切帧/1002 取钥/4013 解密，并写入 AI 日志。
 UAM_3366_PASSTHROUGH_ONLY = False
 DFM_3366_PASSTHROUGH_ONLY = UAM_3366_PASSTHROUGH_ONLY
 TYPE9_LEARNING_MODE = "118-tiered-pass-live"
+
+
+def type9_legacy_builtin_intercepts_enabled() -> bool:
+    """三角洲遗留：tfp_called 链路与 mtxdfm 黑名单 empty_2000。UAM 专版关闭。"""
+    return str(APP_EDITION or "").strip().lower() != "uam"
+
+
+def type9_uam_content_blacklist_enabled() -> bool:
+    """暗区：0x8418 进程上报命中黑名单时替换为 0x8306 固定叶。"""
+    return str(APP_EDITION or "").strip().lower() == "uam"
 
 
 def is_dfm_plugin_game(game_id: object) -> bool:
